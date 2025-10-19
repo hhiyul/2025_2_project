@@ -229,7 +229,5 @@ def main():
 
 if __name__ == "__main__":
     # Windows 안전설정
-    print("[bottom] main 진입 직전")
     torch.multiprocessing.set_start_method("spawn", force=True)
-    print("[bottom] set_start_method OK")
     main()
