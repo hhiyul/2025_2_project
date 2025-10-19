@@ -7,6 +7,8 @@ from torch.utils.data import Dataset, DataLoader
 from datasets import load_dataset, ClassLabel, DatasetDict
 import numpy as np
 
+from torch.amp import autocast, GradScaler
+
 import math
 import time
 from typing import Optional, Tuple, Dict
@@ -123,7 +125,7 @@ class SmallCNN(nn.Module):
 def main():
     final_dataset = prepare_dataset()
     EPOCHS = 5
-    BATCH_SIZE = 32  #초기는 32
+    BATCH_SIZE = 128  #초기는 32
     K = 3
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -138,6 +140,8 @@ def main():
     start_time = time.time()
     
     num_classes = len(final_dataset["train"].features["label"].names)
+
+
     for fold, (train_idx, val_idx) in enumerate(skf.split(indices, labels), 1):
         print(f"\n================ Fold {fold}/{K} 시작 ================")
         fold_start = time.time()
@@ -150,14 +154,18 @@ def main():
         val_ds   = FruitHFDataset(val_split,   transform=val_transform)
 
         train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True,
-                                num_workers=8, pin_memory=(device.type == "cuda"))
+                                num_workers=8, pin_memory=(device.type == "cuda"), persistent_workers=(4>0), prefetch_factor=2)
         val_loader   = DataLoader(val_ds,   batch_size=BATCH_SIZE, shuffle=False,
-                                num_workers=8, pin_memory=(device.type == "cuda"))
+                                num_workers=8, pin_memory=(device.type == "cuda"), persistent_workers=(4>0), prefetch_factor=2)
+        
+        torch.backends.cudnn.benchmark = True
 
         # --- 모델/손실/옵티마이저 ---
         model = SmallCNN(num_classes).to(device)
         criterion = nn.CrossEntropyLoss()
         optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+
+        scaler = GradScaler()
 
         val_acc_list = []
 
@@ -170,42 +178,54 @@ def main():
             model.train()
             total, correct, loss_sum = 0, 0, 0
             pbar = tqdm(train_loader, desc=f"Fold {fold} Epoch {epoch} [Train]", ncols=100)
+
             for x, y in pbar:
-                x, y = x.to(device), y.to(device)
-                optimizer.zero_grad()
-                out = model(x)
-                loss = criterion(out, y)
-                loss.backward()
-                optimizer.step()
+                # GPU 전송 최적화
+                x = x.to(device, non_blocking=True)
+                y = y.to(device, non_blocking=True)
 
-                loss_sum += loss.item() * x.size(0)
-                correct  += (out.argmax(1) == y).sum().item()
-                total    += x.size(0)
-                pbar.set_postfix({"loss": f"{loss.item():.4f}", "acc": f"{(correct/total):.4f}"})
+                optimizer.zero_grad(set_to_none=True)
 
-            tr_acc  = correct / total
-            tr_loss = loss_sum / total
-            print(f"Train ▶ acc: {tr_acc:.4f} | loss: {tr_loss:.4f}")
-
-            # ---- [Validation] ----
-            model.eval()
-            v_total, v_correct, v_loss_sum = 0, 0, 0
-            pbar_val = tqdm(val_loader, desc=f"Fold {fold} Epoch {epoch} [Val]", ncols=100)
-            with torch.no_grad():
-                for x, y in pbar_val:
-                    x, y = x.to(device), y.to(device)
+                with autocast("cuda"): 
                     out = model(x)
                     loss = criterion(out, y)
-                    v_loss_sum += loss.item() * x.size(0)
-                    v_correct  += (out.argmax(1) == y).sum().item()
-                    v_total    += x.size(0)
-                    pbar_val.set_postfix({"val_loss": f"{loss.item():.4f}",
-                                        "val_acc": f"{(v_correct/v_total):.4f}"})
 
-            va_acc  = v_correct / max(1, v_total)
-            va_loss = v_loss_sum / max(1, v_total)
-            val_acc_list.append(va_acc)
-            print(f"Val ▶ acc: {va_acc:.4f} | loss: {va_loss:.4f}")
+                # ✅ AMP: scaled backward & step
+                    scaler.scale(loss).backward()
+
+                    scaler.step(optimizer)
+                    scaler.update()
+
+                    # 통계
+                    bs = x.size(0)
+                    loss_sum += loss.item() * bs
+                    correct  += (out.argmax(1) == y).sum().item()
+                    total    += bs
+
+            tr_acc  = correct / max(1, total)
+            tr_loss = loss_sum / max(1, total)
+            print(f"Train ▶ acc: {tr_acc:.4f} | loss: {tr_loss:.4f}")
+                # ---- [Validation] ----
+            model.eval()
+            v_total = v_correct = 0
+            v_loss_sum = 0.0
+            with torch.no_grad():
+                with autocast("cuda"):
+                    for x, y in tqdm(val_loader, desc=f"Fold {fold} Epoch {epoch} [Val]", ncols=100):
+                        x = x.to(device, non_blocking=True)
+                        y = y.to(device, non_blocking=True)
+
+                        out = model(x)
+                        loss = criterion(out, y)
+
+                        v_loss_sum += loss.item() * x.size(0)
+                        v_correct  += (out.argmax(1) == y).sum().item()
+                        v_total    += x.size(0)
+
+                    va_acc  = v_correct / max(1, v_total)
+                    va_loss = v_loss_sum / max(1, v_total)
+                    val_acc_list.append(va_acc)
+                    print(f"Val ▶ acc: {va_acc:.4f} | loss: {va_loss:.4f}")
 
             epoch_time = time.time() - epoch_start
             print(f"⏱️  Epoch {epoch} 완료 (소요시간: {epoch_time:.2f}초)")
@@ -228,6 +248,5 @@ def main():
 
 
 if __name__ == "__main__":
-    # Windows 안전설정
     torch.multiprocessing.set_start_method("spawn", force=True)
     main()
