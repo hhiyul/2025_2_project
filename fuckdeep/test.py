@@ -125,7 +125,7 @@ class SmallCNN(nn.Module):
 def main():
     final_dataset = prepare_dataset()
     EPOCHS = 5
-    BATCH_SIZE = 128  #초기는 32
+    BATCH_SIZE = 32  #데스크탑은 128로
     K = 3
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -154,16 +154,16 @@ def main():
         val_ds   = FruitHFDataset(val_split,   transform=val_transform)
 
         train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True,
-                                num_workers=8, pin_memory=(device.type == "cuda"), persistent_workers=(4>0), prefetch_factor=2)
+                                num_workers=4, pin_memory=(device.type == "cuda"), persistent_workers=(4>0), prefetch_factor=2)
         val_loader   = DataLoader(val_ds,   batch_size=BATCH_SIZE, shuffle=False,
-                                num_workers=8, pin_memory=(device.type == "cuda"), persistent_workers=(4>0), prefetch_factor=2)
+                                num_workers=4, pin_memory=(device.type == "cuda"), persistent_workers=(4>0), prefetch_factor=2)
         
         torch.backends.cudnn.benchmark = True
 
         # --- 모델/손실/옵티마이저 ---
         model = SmallCNN(num_classes).to(device)
         criterion = nn.CrossEntropyLoss()
-        optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
 
         scaler = GradScaler()
 
@@ -237,7 +237,7 @@ def main():
 
     # --- (5) 전체 요약 (fold ‘바깥’) ---
     total_time = time.time() - start_time
-    print(f"\n================ 전체 {K}-Fold 학습 완료! 총 소요시간: {total_time/60:.2f}분 ================")
+    print(f"\n================ 학습종료 총 소요시간: {total_time/60:.2f}분 ================")
 
     print("\n===== K-Fold 결과 요약 =====")
     best_accs = [max(a) if isinstance(a, list) else a for a in fold_accs]
