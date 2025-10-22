@@ -1,3 +1,4 @@
+import os
 import torch
 import torch.nn as nn
 from sklearn.model_selection import StratifiedKFold
@@ -6,59 +7,85 @@ from torchvision import models, transforms
 from torch.utils.data import Dataset, DataLoader
 from datasets import load_dataset, ClassLabel, DatasetDict
 import numpy as np
-
 from torch.amp import autocast, GradScaler
-
 import math
 import time
 from typing import Optional, Tuple, Dict
 import torch.nn.functional as F
 from sklearn.metrics import f1_score
 
+#save_path = ('G:\내 드라이브\2025_2_project') 학습 결과물 저장경로임
+#os.makedirs(save_path, exist_ok=True) 이것도
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # -------------------------------------------------- 전처리 파트 ∨------------------------------------------------
 def prepare_dataset():
     dataset = load_dataset("Densu341/Fresh-rotten-fruit")
 
-
+    # 1️⃣ 제거할 라벨 설정
     remove_labels = [18, 20, 16, 13, 2, 5, 7, 9]
     labels = np.array(dataset["train"]["label"])
     mask = ~np.isin(labels, remove_labels)
 
-    # 3. 필요 없는 라벨 제거
+    # 2️⃣ 필요 없는 라벨 제거
     clean_dataset = dataset["train"].select(np.where(mask)[0])
 
-    # 4. train/val split
+    # 3️⃣ Train/Val 분할
     dataset = clean_dataset.train_test_split(test_size=0.2)
     train_dataset, val_dataset = dataset["train"], dataset["test"]
 
-    # 5. 실제 남은 라벨 인덱스 및 이름 추출
+    # 4️⃣ 실제 남은 라벨 및 이름 정리
     unique_labels = sorted(set(train_dataset["label"]) | set(val_dataset["label"]))
     all_labels = [train_dataset.features["label"].int2str(i) for i in unique_labels]
 
-    # 6. 새로운 ClassLabel 정의
     new_classlabel = ClassLabel(num_classes=len(all_labels), names=all_labels)
 
-    # 7. 라벨 값 재매핑
+    # 5️⃣ 라벨 값 재매핑
     def remap_labels(example):
         label_name = train_dataset.features["label"].int2str(example["label"])
         example["label"] = all_labels.index(label_name)
         return example
 
+    print("🔁 Remapping labels...")
     train_dataset = train_dataset.map(remap_labels)
     val_dataset   = val_dataset.map(remap_labels)
-
     train_dataset = train_dataset.cast_column("label", new_classlabel)
     val_dataset   = val_dataset.cast_column("label", new_classlabel)
 
-    # 8. 최종 DatasetDict 생성
-    final_dataset = DatasetDict({
-        "train": train_dataset,
-        "test": val_dataset
-    })
-    return final_dataset
+    # 6️⃣ 이미지 RGB 고정
+    def to_rgb(example):
+        img = example["image"]
+        if img.mode != "RGB":
+            img = img.convert("RGB")
+        example["image"] = img
+        return example
 
+    print("🎨 Converting to RGB (1회 실행)...")
+    train_dataset = train_dataset.map(to_rgb)
+    val_dataset   = val_dataset.map(to_rgb)
+
+    # 7️⃣ 🔥 Transform + Tensor 캐싱
+    def map_train_tf(example):
+        example["image"] = train_transform(example["image"])
+        return example
+
+    def map_val_tf(example):
+        example["image"] = val_transform(example["image"])
+        return example
+
+    print("⚙️ Applying transforms & caching tensors...")
+    train_dataset = train_dataset.map(map_train_tf, batched=False)
+    val_dataset   = val_dataset.map(map_val_tf, batched=False)
+
+    # 8️⃣ Tensor 형식 지정 (HuggingFace → PyTorch용)
+    train_dataset.set_format(type="torch", columns=["image", "label"])
+    val_dataset.set_format(type="torch", columns=["image", "label"])
+
+    print("✅ Dataset ready! (Tensor cached)")
+    return DatasetDict({
+        "train": train_dataset,
+        "test":  val_dataset
+    })
 
 train_transform = transforms.Compose([
     transforms.Resize((224,224)),
@@ -75,24 +102,20 @@ val_transform = transforms.Compose([
     transforms.Normalize([0.485,0.456,0.406],
                          [0.229,0.224,0.225])
 ])
+
 # -------------------------------------------------- 전처리 파트 ^------------------------------------------------
 # PyTorch Dataset 래퍼
 # --------------------------------------------------
 class FruitHFDataset(Dataset):
-    def __init__(self, hf_dataset, transform=None):
+    def __init__(self, hf_dataset):
         self.dataset = hf_dataset
-        self.transform = transform
 
     def __len__(self):
         return len(self.dataset)
 
     def __getitem__(self, idx):
-        sample = self.dataset[idx]
-        image = sample["image"].convert("RGB")  # RGBA → RGB
-        label = sample["label"]                # 이미 0~N-1 정수
-        if self.transform:
-            image = self.transform(image)
-        return image, label
+        item = self.dataset[idx]
+        return item["image"], int(item["label"])
 
 
 # ------------------------------------------------------------
@@ -310,11 +333,12 @@ class CMTClassifier(nn.Module):
 def main():
     final_dataset = prepare_dataset()
     EPOCHS = 5
-    BATCH_SIZE = 32  #데스크탑은 128로
+    BATCH_SIZE = 128  #데스크탑은 128로
     K = 3
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("device:", device, flush=True)
+    print(torch.cuda.get_device_name(0))
 
 # StratifiedKFold를 위해 라벨 벡터 추출
     labels  = np.asarray(final_dataset["train"]["label"], dtype=np.int64)
@@ -338,10 +362,17 @@ def main():
         val_ds   = FruitHFDataset(val_split,   transform=val_transform)
 
         train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True,
-                                num_workers=2, pin_memory=True, persistent_workers=True, prefetch_factor=1)
+                                num_workers=4, pin_memory=True, persistent_workers=False, prefetch_factor=2)
         val_loader   = DataLoader(val_ds,   batch_size=BATCH_SIZE, shuffle=False,
-                                num_workers=2, pin_memory=True, persistent_workers=True, prefetch_factor=1)
+                                num_workers=4, pin_memory=True, persistent_workers=False, prefetch_factor=2)
         
+        #병목인지 확인하는 코드임---------------------
+        loader_start = time.time()
+        for i, (x, y) in enumerate(train_loader):
+            if i == 10:
+                break
+        print(f"첫 10 batch 로딩 시간: {time.time() - loader_start:.2f}초")
+        #--------------------------------------------
         torch.backends.cudnn.benchmark = True
 
         # --- 모델/손실/옵티마이저 ---
@@ -418,6 +449,10 @@ def main():
         fold_time = time.time() - fold_start
         print(f"✅ Fold {fold} 완료! (소요시간: {fold_time/60:.2f}분)")
         fold_accs.append(val_acc_list)
+
+        #save_path = ('G:\내 드라이브\2025_2_project')  # 드라이브에 훈련결과 넣는 코드
+        #os.makedirs(save_path, exist_ok=True)
+        #torch.save(model.state_dict(), f"{save_path}\\best_model_fold{fold}.pt")
 
     # --- (5) 전체 요약 (fold ‘바깥’) ---
     total_time = time.time() - start_time
