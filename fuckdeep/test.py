@@ -154,9 +154,9 @@ def main():
         val_ds   = FruitHFDataset(val_split,   transform=val_transform)
 
         train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True,
-                                num_workers=4, pin_memory=(device.type == "cuda"), persistent_workers=(4>0), prefetch_factor=2)
+                                num_workers=4, pin_memory=True, persistent_workers=True, prefetch_factor=1)
         val_loader   = DataLoader(val_ds,   batch_size=BATCH_SIZE, shuffle=False,
-                                num_workers=4, pin_memory=(device.type == "cuda"), persistent_workers=(4>0), prefetch_factor=2)
+                                num_workers=4, pin_memory=True, persistent_workers=True, prefetch_factor=1)
         
         torch.backends.cudnn.benchmark = True
 
