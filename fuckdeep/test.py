@@ -66,7 +66,7 @@ train_transform = transforms.Compose([
     transforms.RandomRotation(15),
     transforms.ToTensor(),
     transforms.Normalize([0.485,0.456,0.406],
-                         [0.229,0.224,0.225])  # ImageNet 기준
+                         [0.229,0.224,0.225])
 ])
 
 val_transform = transforms.Compose([
@@ -119,8 +119,8 @@ class SmallCNN(nn.Module):
         return x  # raw logits
     
 
-# ------------------------------------------------------------
-# 4) 3-Fold 분할 & 학습 루프 (bs=32, epochs=5)
+# ------------------------------------------------------------      
+# 4) 3-Fold 분할 & 학습 루프
 # ------------------------------------------------------------
 def main():
     final_dataset = prepare_dataset()

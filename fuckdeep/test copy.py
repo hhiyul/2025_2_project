@@ -18,7 +18,7 @@ from sklearn.metrics import f1_score
 #os.makedirs(save_path, exist_ok=True) 이것도
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-# -------------------------------------------------- 전처리 파트 ∨------------------------------------------------
+# ----------------------------------- 전처리 파트 ∨--------------------------------------
 def prepare_dataset():
     dataset = load_dataset("Densu341/Fresh-rotten-fruit")
 
@@ -47,8 +47,19 @@ def prepare_dataset():
         return example
 
     print("🔁 Remapping labels...")
-    train_dataset = train_dataset.map(remap_labels)
-    val_dataset   = val_dataset.map(remap_labels)
+    train_dataset = train_dataset.map(
+        remap_labels,
+        num_proc=os.cpu_count() // 2,          # CPU 절반 병렬 처리
+        load_from_cache_file=True,
+        desc="Remapping train labels"
+    )
+    val_dataset = val_dataset.map(
+        remap_labels,
+        num_proc=os.cpu_count() // 2,
+        load_from_cache_file=True,
+        desc="Remapping val labels"
+    )
+
     train_dataset = train_dataset.cast_column("label", new_classlabel)
     val_dataset   = val_dataset.cast_column("label", new_classlabel)
 
@@ -60,9 +71,19 @@ def prepare_dataset():
         example["image"] = img
         return example
 
-    print("🎨 Converting to RGB (1회 실행)...")
-    train_dataset = train_dataset.map(to_rgb)
-    val_dataset   = val_dataset.map(to_rgb)
+    print("🎨 Converting to RGB (parallel, 1회 실행)...")
+    train_dataset = train_dataset.map(
+        to_rgb,
+        num_proc=os.cpu_count() // 2,          # 멀티코어 변환
+        load_from_cache_file=True,
+        desc="Converting train RGB"
+    )
+    val_dataset = val_dataset.map(
+        to_rgb,
+        num_proc=os.cpu_count() // 2,
+        load_from_cache_file=True,
+        desc="Converting val RGB"
+    )
 
     # 7️⃣ 🔥 Transform + Tensor 캐싱
     def map_train_tf(example):
@@ -74,8 +95,20 @@ def prepare_dataset():
         return example
 
     print("⚙️ Applying transforms & caching tensors...")
-    train_dataset = train_dataset.map(map_train_tf, batched=False)
-    val_dataset   = val_dataset.map(map_val_tf, batched=False)
+    train_dataset = train_dataset.map(
+        map_train_tf,
+        num_proc=os.cpu_count() // 2,          # 💥 CPU 병렬처리
+        batched=False,                         # PIL 변환은 단일 샘플 처리
+        load_from_cache_file=True,             # 기존 캐시 있으면 재활용
+        desc="Transforming train images"
+    )
+    val_dataset = val_dataset.map(
+        map_val_tf,
+        num_proc=os.cpu_count() // 2,
+        batched=False,
+        load_from_cache_file=True,
+        desc="Transforming val images"
+    )
 
     # 8️⃣ Tensor 형식 지정 (HuggingFace → PyTorch용)
     train_dataset.set_format(type="torch", columns=["image", "label"])
@@ -217,9 +250,6 @@ class TransformerBlock(nn.Module):
     
 
 class CMTClassifier(nn.Module):
-    """
-    CNN 얕게 → [LPU → Transformer] @14x14 → 다운샘플 → [LPU → Transformer] @7x7 → GAP → LN → FC
-    """
     def __init__(
         self,
         num_classes: int,
