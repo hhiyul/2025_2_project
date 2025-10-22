@@ -17,7 +17,7 @@ from sklearn.metrics import f1_score
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
+# -------------------------------------------------- 전처리 파트 ∨------------------------------------------------
 def prepare_dataset():
     dataset = load_dataset("Densu341/Fresh-rotten-fruit")
 
@@ -75,8 +75,7 @@ val_transform = transforms.Compose([
     transforms.Normalize([0.485,0.456,0.406],
                          [0.229,0.224,0.225])
 ])
-
-# --------------------------------------------------
+# -------------------------------------------------- 전처리 파트 ^------------------------------------------------
 # PyTorch Dataset 래퍼
 # --------------------------------------------------
 class FruitHFDataset(Dataset):
@@ -113,28 +112,51 @@ class DropPath(nn.Module):
         shape = (x.shape[0],) + (1,) * (x.ndim - 1)
         random_tensor = x.new_empty(shape).bernoulli_(keep_prob)
         return x.div(keep_prob) * random_tensor
-    
-class ConvBNAct(nn.Module):
+
+class DepthwiseConv2d(nn.Module):
+    def __init__(self, channels, k=3, s=1, p=1, bias=False):
+        super().__init__()
+        self.dw = nn.Conv2d(channels, channels, k, s, p, groups=channels, bias=bias)
+
+    def forward(self, x):
+        return self.dw(x)
+
+class ConvBNGELU(nn.Module):
     def __init__(self, in_ch, out_ch, k=3, s=1, p=1):
         super().__init__()
         self.conv = nn.Conv2d(in_ch, out_ch, k, s, p, bias=False)
         self.bn   = nn.BatchNorm2d(out_ch, eps=1e-5, momentum=0.1)
-        self.act  = nn.ReLU(inplace=True)
+        self.act  = nn.GELU()
 
     def forward(self, x):
         return self.act(self.bn(self.conv(x)))
-    
+
+
 class ConvStage(nn.Module):
-    """ 간단한 다운샘플링 스테이지: (Stride=2)로 해상도 절반, 채널 확장 """
     def __init__(self, in_ch, out_ch):
         super().__init__()
-        self.ds   = ConvBNAct(in_ch, out_ch, k=3, s=2, p=1)   # 다운샘플링
-        self.body = ConvBNAct(out_ch, out_ch, k=3, s=1, p=1)  # 한 번 더 conv
+        self.ds   = ConvBNGELU(in_ch, out_ch, k=3, s=2, p=1)   # downsample
+        self.body = ConvBNGELU(out_ch, out_ch, k=3, s=1, p=1)
 
     def forward(self, x):
         x = self.ds(x)
         x = self.body(x)
         return x
+    
+class LPU(nn.Module):
+    """ Local Perception Unit: 3x3 depthwise → GELU → BN (채널 보존) """
+    def __init__(self, channels):
+        super().__init__()
+        self.dw  = DepthwiseConv2d(channels, k=3, s=1, p=1, bias=False)
+        self.bn  = nn.BatchNorm2d(channels, eps=1e-5, momentum=0.1)
+        self.act = nn.GELU()
+
+    def forward(self, x):
+        x = self.dw(x)
+        x = self.bn(x)
+        x = self.act(x)
+        return x
+    
     
 class MLP(nn.Module):
     def __init__(self, dim, mlp_ratio=3.0, drop=0.1):
@@ -146,55 +168,39 @@ class MLP(nn.Module):
         self.drop = nn.Dropout(drop)
 
     def forward(self, x):
-        x = self.fc1(x)
-        x = self.act(x)
-        x = self.drop(x)
-        x = self.fc2(x)
-        x = self.drop(x)
+        x = self.fc1(x); x = self.act(x); x = self.drop(x)
+        x = self.fc2(x); x = self.drop(x)
         return x
 
-
 class TransformerBlock(nn.Module):
-    """ Pre-LN, MHSA(+Dropout), MLP(+Dropout), DropPath """
-    def __init__(self, dim, num_heads, mlp_ratio=3.0, attn_drop=0.0, proj_drop=0.1, drop_path=0.0):
+    def __init__(self, dim, num_heads, mlp_ratio=3.0, attn_drop=0.0, proj_drop=0.1, drop_path=0.0): #drop_path는 에포크 늘어나면 늘리삼
         super().__init__()
-        self.norm1 = nn.LayerNorm(dim, eps=1e-6)
+        self.norm1 = nn.LayerNorm(dim, eps=1e-6) #1e-5 ~ 1e-7 사이 값
         self.attn  = nn.MultiheadAttention(dim, num_heads, dropout=attn_drop, batch_first=True)
-        self.proj_drop = nn.Dropout(proj_drop)
-        self.drop_path1 = DropPath(drop_path)
+        self.drop1 = nn.Dropout(proj_drop)
+        self.dp1   = DropPath(drop_path)
 
         self.norm2 = nn.LayerNorm(dim, eps=1e-6)
         self.mlp   = MLP(dim, mlp_ratio=mlp_ratio, drop=proj_drop)
-        self.drop_path2 = DropPath(drop_path)
+        self.dp2   = DropPath(drop_path)
 
     def forward(self, x):
         # x: (B, N, C)
-        x_res = x
-        x = self.norm1(x)
-        x, _ = self.attn(x, x, x, need_weights=False)
-        x = self.proj_drop(x)
-        x = x_res + self.drop_path1(x)
-
-        x_res = x
-        x = self.norm2(x)
-        x = self.mlp(x)
-        x = x_res + self.drop_path2(x)
+        y, _ = self.attn(self.norm1(x), self.norm1(x), self.norm1(x), need_weights=False)
+        x = x + self.dp1(self.drop1(y))
+        x = x + self.dp2(self.mlp(self.norm2(x)))
         return x
+
     
 
 class CMTClassifier(nn.Module):
     """
-    입력:  B x 3 x 224 x 224
-    출력:  B x num_classes  (결합 라벨용 로짓)
-    설계:
-      - CNN(얕게): 224 -> 112 -> 56 -> 28 -> 14
-      - Transformer(깊게): 14x14 (dim=256, depth=3) -> 7x7 (dim=384, depth=6)
-      - Head: GAP(토큰 평균) -> LayerNorm -> Linear(num_classes)
+    CNN 얕게 → [LPU → Transformer] @14x14 → 다운샘플 → [LPU → Transformer] @7x7 → GAP → LN → FC
     """
     def __init__(
         self,
         num_classes: int,
-        # CNN 채널
+        # CNN channels
         stem_channels: int = 64,
         c_stage1: int = 96,
         c_stage2: int = 128,
@@ -202,70 +208,53 @@ class CMTClassifier(nn.Module):
         # Transformer dims/heads/depths
         t_dim1: int = 256,  t_heads1: int = 4,  t_depth1: int = 3,  t_mlp1: float = 3.0,
         t_dim2: int = 384,  t_heads2: int = 6,  t_depth2: int = 6,  t_mlp2: float = 3.5,
-        # Dropouts/DropPath
         attn_drop: float = 0.0,
         proj_drop: float = 0.1,
-        drop_path_rate: float = 0.1,  # 깊이에 따라 선형 증가
+        drop_path_rate: float = 0.0,  # 에폭 짧으면 0.0, 길게 학습하면 0.05~0.1
     ):
         super().__init__()
         self.num_classes = num_classes
 
         # ----- CNN stem (224 -> 112) -----
         self.stem = nn.Sequential(
-            ConvBNAct(3, stem_channels // 2, k=3, s=2, p=1),   # 224 -> 112
-            ConvBNAct(stem_channels // 2, stem_channels, k=3, s=1, p=1),
+            ConvBNGELU(3, stem_channels // 2, k=3, s=2, p=1),
+            ConvBNGELU(stem_channels // 2, stem_channels, k=3, s=1, p=1),
         )
 
-        # ----- CNN stages (얕게) -----
-        # 112 -> 56
+        # ----- CNN stages (112 -> 56 -> 28 -> 14) -----
         self.stage1 = ConvStage(stem_channels, c_stage1)
-        # 56  -> 28
         self.stage2 = ConvStage(c_stage1, c_stage2)
-        # 28  -> 14
         self.stage3 = ConvStage(c_stage2, c_stage3)
 
-        # ----- To Tokens (14x14 -> tokens, 채널 -> t_dim1) -----
+        # ----- to embed (14x14, C3 -> D1) -----
         self.to_embed1 = nn.Conv2d(c_stage3, t_dim1, kernel_size=1, stride=1, padding=0, bias=True)
 
-        # ----- Transformer stage A @ 14x14 (N=196) -----
-        dpr1 = torch.linspace(0, drop_path_rate * 0.5, steps=t_depth1).tolist()  # 앞 스테이지는 낮게
-        blocks1 = []
-        for i in range(t_depth1):
-            blocks1.append(
-                TransformerBlock(
-                    dim=t_dim1,
-                    num_heads=t_heads1,
-                    mlp_ratio=t_mlp1,
-                    attn_drop=attn_drop,
-                    proj_drop=proj_drop,
-                    drop_path=dpr1[i],
-                )
-            )
-        self.trans1 = nn.Sequential(*blocks1)
+        # ----- Stage A @14x14 : LPU → Transformer(depth=t_depth1) -----
+        self.lpu1 = LPU(t_dim1)
+        dpr1 = torch.linspace(0, drop_path_rate * 0.5, steps=t_depth1).tolist()
+        self.trans1 = nn.Sequential(*[
+            TransformerBlock(
+                dim=t_dim1, num_heads=t_heads1, mlp_ratio=t_mlp1,
+                attn_drop=attn_drop, proj_drop=proj_drop, drop_path=dpr1[i]
+            ) for i in range(t_depth1)
+        ])
 
-        # ----- Downsample tokens (14x14 -> 7x7), dim: t_dim1 -> t_dim2 -----
-        #   conv로 공간을 절반으로 줄이고 채널(임베딩 차원)을 확장
+        # ----- down tokens: 14->7, D1->D2 -----
         self.down_tokens = nn.Sequential(
-            nn.Conv2d(t_dim1, t_dim2, kernel_size=3, stride=2, padding=1, bias=False),  # 14->7
+            nn.Conv2d(t_dim1, t_dim2, kernel_size=3, stride=2, padding=1, bias=False),
             nn.BatchNorm2d(t_dim2, eps=1e-5, momentum=0.1),
-            nn.ReLU(inplace=True),
+            nn.GELU(),
         )
 
-        # ----- Transformer stage B @ 7x7 (N=49) -----
-        dpr2 = torch.linspace(drop_path_rate * 0.5, drop_path_rate, steps=t_depth2).tolist()  # 뒤 스테이지는 높게
-        blocks2 = []
-        for i in range(t_depth2):
-            blocks2.append(
-                TransformerBlock(
-                    dim=t_dim2,
-                    num_heads=t_heads2,
-                    mlp_ratio=t_mlp2,
-                    attn_drop=attn_drop,
-                    proj_drop=proj_drop,
-                    drop_path=dpr2[i],
-                )
-            )
-        self.trans2 = nn.Sequential(*blocks2)
+        # ----- Stage B @7x7 : LPU → Transformer(depth=t_depth2) -----
+        self.lpu2 = LPU(t_dim2)
+        dpr2 = torch.linspace(drop_path_rate * 0.5, drop_path_rate, steps=t_depth2).tolist()
+        self.trans2 = nn.Sequential(*[
+            TransformerBlock(
+                dim=t_dim2, num_heads=t_heads2, mlp_ratio=t_mlp2,
+                attn_drop=attn_drop, proj_drop=proj_drop, drop_path=dpr2[i]
+            ) for i in range(t_depth2)
+        ])
 
         # ----- Head -----
         self.head_norm = nn.LayerNorm(t_dim2, eps=1e-6)
@@ -273,54 +262,48 @@ class CMTClassifier(nn.Module):
 
         self.apply(self._init_weights)
 
-    # 가중치 초기화
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
             nn.init.trunc_normal_(m.weight, std=0.02)
-            if m.bias is not None:
-                nn.init.constant_(m.bias, 0)
+            if m.bias is not None: nn.init.constant_(m.bias, 0)
         elif isinstance(m, nn.Conv2d):
             nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
-            if m.bias is not None:
-                nn.init.constant_(m.bias, 0)
+            if m.bias is not None: nn.init.constant_(m.bias, 0)
         elif isinstance(m, (nn.LayerNorm, nn.BatchNorm2d)):
-            if hasattr(m, "weight") and m.weight is not None:
-                nn.init.ones_(m.weight)
-            if hasattr(m, "bias") and m.bias is not None:
-                nn.init.zeros_(m.bias)
+            if hasattr(m, "weight") and m.weight is not None: nn.init.ones_(m.weight)
+            if hasattr(m, "bias") and m.bias is not None:     nn.init.zeros_(m.bias)
 
     def forward(self, x):
-        # ----- CNN 얕은 특징 -----
-        x = self.stem(x)          # B x Cs   x 112 x 112
-        x = self.stage1(x)        # B x C1   x 56  x 56
-        x = self.stage2(x)        # B x C2   x 28  x 28
-        x = self.stage3(x)        # B x C3   x 14  x 14
+        # CNN 얕은 특징
+        x = self.stem(x)          # 224 -> 112
+        x = self.stage1(x)        # 112 -> 56
+        x = self.stage2(x)        # 56  -> 28
+        x = self.stage3(x)        # 28  -> 14
 
-        # ----- 임베딩 차원 맞추기 -----
-        x = self.to_embed1(x)     # B x D1   x 14  x 14
+        # 임베딩
+        x = self.to_embed1(x)     # B x D1 x 14 x 14
 
-        # ----- Transformer A (14x14, 깊이 낮음) -----
+        # Stage A: LPU → Transformer @14x14
+        x = self.lpu1(x)
         B, C, H, W = x.shape
-        x = x.flatten(2).transpose(1, 2)          # B x N x D1,  N=H*W
-        x = self.trans1(x)                         # B x N x D1
+        x = x.flatten(2).transpose(1, 2)           # B x 196 x D1
+        x = self.trans1(x)
         x = x.transpose(1, 2).view(B, C, H, W)     # B x D1 x 14 x 14
 
-        # ----- 토큰 다운샘플링 (14->7, D1->D2) -----
+        # Downsample tokens: 14 -> 7
         x = self.down_tokens(x)                    # B x D2 x 7 x 7
 
-        # ----- Transformer B (7x7, 깊이 높음) -----
+        # Stage B: LPU → Transformer @7x7
+        x = self.lpu2(x)
         B, C, H, W = x.shape
         x = x.flatten(2).transpose(1, 2)           # B x 49 x D2
         x = self.trans2(x)                         # B x 49 x D2
 
-        # ----- Head: GAP over tokens, LN, FC -----
-        x = x.mean(dim=1)                          # B x D2  (토큰 평균)
-        x = self.head_norm(x)                      # B x D2
-        logits = self.fc(x)                        # B x num_classes
-
+        # Head
+        x = x.mean(dim=1)                          # token 평균 (GAP)
+        x = self.head_norm(x)
+        logits = self.fc(x)
         return logits
-    
-
 # ------------------------------------------------------------      
 # 4) 3-Fold 분할 & 학습 루프
 # ------------------------------------------------------------
@@ -340,7 +323,6 @@ def main():
 
     fold_accs = []
     start_time = time.time()
-    
     num_classes = len(final_dataset["train"].features["label"].names)
 
 
