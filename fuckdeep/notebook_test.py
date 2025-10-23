@@ -16,93 +16,8 @@ from sklearn.metrics import f1_score, classification_report, confusion_matrix, b
 from datasets import load_from_disk
 from torch.autograd import Variable
 from collections import Counter
-
+#노트북 환경에서 실행 하는 코드
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-train_transform = transforms.Compose([
-    transforms.RandomResizedCrop(224, scale=(0.8, 1.0), ratio=(3/4, 4/3)),
-    transforms.RandomHorizontalFlip(p=0.5),
-    transforms.RandomRotation(degrees=15),
-    transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.15, hue=0.02),
-    transforms.ToTensor(),
-    transforms.Normalize([0.485,0.456,0.406],
-                         [0.229,0.224,0.225]),
-    transforms.RandomErasing(p=0.25, scale=(0.02, 0.1), ratio=(0.3, 3.3))
-])
-
-val_transform = transforms.Compose([
-    transforms.Resize(256),
-    transforms.CenterCrop(224),
-    transforms.ToTensor(),
-    transforms.Normalize([0.485,0.456,0.406],
-                         [0.229,0.224,0.225])
-])
-
-
-def prepare_dataset():
-    dataset = load_dataset("Densu341/Fresh-rotten-fruit")
-
-    # 1) 라벨 제거 → 2) split → 3) 라벨 재매핑 → 4) RGB 고정
-    # (당신 코드 그대로 유지)
-    remove_labels = [18, 20, 16, 13, 2, 5, 7, 9]
-    labels = np.array(dataset["train"]["label"])
-    mask = ~np.isin(labels, remove_labels)
-    clean_dataset = dataset["train"].select(np.where(mask)[0])
-
-    dataset = clean_dataset.train_test_split(test_size=0.2, seed=42)
-    train_dataset, val_dataset = dataset["train"], dataset["test"]
-
-    unique_labels = sorted(set(train_dataset["label"]) | set(val_dataset["label"]))
-    all_labels = [train_dataset.features["label"].int2str(i) for i in unique_labels]
-    new_classlabel = ClassLabel(num_classes=len(all_labels), names=all_labels)
-
-    def remap_labels(example):
-        label_name = train_dataset.features["label"].int2str(example["label"])
-        example["label"] = all_labels.index(label_name)
-        return example
-
-    train_dataset = train_dataset.map(remap_labels, num_proc=os.cpu_count()//2, load_from_cache_file=True, desc="Remapping train labels")
-    val_dataset   = val_dataset.map(remap_labels,   num_proc=os.cpu_count()//2, load_from_cache_file=True, desc="Remapping val labels")
-
-    train_dataset = train_dataset.cast_column("label", new_classlabel)
-    val_dataset   = val_dataset.cast_column("label",   new_classlabel)
-
-    # ---- 결정적 처리 ----
-
-    # 6) 이미지 RGB 고정 (결정적)
-    def to_rgb(example):
-        img = example["image"]
-        if img.mode != "RGB":
-            img = img.convert("RGB")
-        example["image"] = img
-        return example
-
-    train_dataset = train_dataset.map(to_rgb, num_proc=os.cpu_count()//2, load_from_cache_file=True, desc="Converting train RGB")
-    val_dataset   = val_dataset.map(to_rgb,   num_proc=os.cpu_count()//2, load_from_cache_file=True, desc="Converting val RGB")
-
-
-    # ✅ 런타임 증강으로 옮기기 (배치 단위)
-    def apply_train_tf(batch):
-        batch["image"] = [train_transform(img) for img in batch["image"]]
-        return batch
-
-    def apply_val_tf(batch):
-        batch["image"] = [val_transform(img) for img in batch["image"]]
-        return batch
-
-    train_dataset.set_transform(apply_train_tf)
-    val_dataset.set_transform(apply_val_tf)
-
-    final_dataset = DatasetDict({"train": train_dataset, "test": val_dataset})
-
-    return final_dataset
-
-
-
-
-
-
-
 
 # PyTorch Dataset 래퍼
 # --------------------------------------------------
@@ -376,7 +291,7 @@ class FocalLoss(nn.Module):
 # ------------------------------------------------------------
 # 메인
 def main():
-    final_dataset = prepare_dataset() #직접 저장한 전처리 데이터셋사용
+    final_dataset = load_from_disk("C:/Users/rkdrn/Downloads/deep_2025/deep") #직접 저장한 전처리 데이터셋사용
 
     num_classes = len(final_dataset["train"].features["label"].names)
     train_labels = [int(x) for x in final_dataset["train"]["label"]]
@@ -533,7 +448,7 @@ def main():
                 print(f"      top-2: {va_top2:.4f} | top-3: {va_top3:.4f}")
 
             
-            save_dir = "C:/Users/USER-PC/Desktop/deep/model_data"
+            save_dir = "C:/Users/rkdrn/Downloads/deep_2025/deep"
             os.makedirs(save_dir, exist_ok=True)
             
             if va_acc > best_acc + 1e-6: 
