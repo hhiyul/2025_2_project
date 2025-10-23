@@ -326,9 +326,7 @@ def main():
     start_time = time.time()
     num_classes = len(final_dataset["train"].features["label"].names)
 
-    print(num_classes)
-
-    """
+    
     for fold, (train_idx, val_idx) in enumerate(skf.split(indices, labels), 1):
         print(f"\n================ Fold {fold}/{K} 시작 ================")
         fold_start = time.time()
@@ -374,59 +372,60 @@ def main():
 
             # ---- [Train] ----
             model.train()
-            total, correct, loss_sum = 0, 0, 0
+            total, correct, loss_sum = 0, 0, 0.0
             pbar = tqdm(train_loader, desc=f"Fold {fold} Epoch {epoch} [Train]", ncols=100)
 
             for x, y in pbar:
-                # GPU 전송 최적화
                 x = x.to(device, non_blocking=True)
                 y = y.to(device, non_blocking=True)
 
                 optimizer.zero_grad(set_to_none=True)
 
-                with autocast("cuda"): 
-                    out = model(x)
+                with autocast("cuda"):
+                    out  = model(x)
                     loss = criterion(out, y)
 
-                # ✅ AMP: scaled backward & step
-                    scaler.scale(loss).backward()
+                # (선택) gradient clipping을 원한다면: scaler.unscale_ 후 clip
+                # scaler.unscale_(optimizer)
+                # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
 
-                    scaler.step(optimizer)
-                    scaler.update()
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
 
-                    # 통계
-                    bs = x.size(0)
-                    loss_sum += loss.item() * bs
-                    correct  += (out.argmax(1) == y).sum().item()
-                    total    += bs
+                bs = x.size(0)
+                loss_sum += loss.item() * bs
+                correct  += (out.argmax(1) == y).sum().item()
+                total    += bs
 
             tr_acc  = correct / max(1, total)
             tr_loss = loss_sum / max(1, total)
             print(f"Train ▶ acc: {tr_acc:.4f} | loss: {tr_loss:.4f}")
                 # ---- [Validation] ----
             model.eval()
-            v_total = v_correct = 0
-            v_loss_sum = 0.0
+            v_total, v_correct, v_loss_sum = 0, 0, 0.0
+            
 
             all_preds, all_labels, all_logits = [], [], []
-            with torch.no_grad():
-                with autocast("cuda"):
-                    for x, y in tqdm(val_loader, desc=f"Fold {fold} Epoch {epoch} [Val]", ncols=100):
-                        x = x.to(device, non_blocking=True)
-                        y = y.to(device, non_blocking=True)
+            with torch.inference_mode():
+                for x, y in val_loader:
+                    x = x.to(device, non_blocking=True)
+                    y = y.to(device, non_blocking=True)
 
-                        out = model(x)
-                        loss = criterion(out, y)
+                    with autocast("cuda"):
+                        out  = model(x)
+                        v_loss = criterion(out, y)
 
-                        v_loss_sum += loss.item() * x.size(0)
-                        preds = out.argmax(1)
-                        v_correct += (preds == y).sum().item()
-                        v_total += x.size(0)
+                    bs = x.size(0)
+                    v_loss_sum += v_loss.item() * bs
+                    preds = out.argmax(1)
+                    v_correct += (preds == y).sum().item()
+                    v_total   += bs
 
-                        # 🔹 예측/정답/로짓 저장 (CPU로 변환)
-                        all_preds.extend(preds.detach().cpu().numpy())
-                        all_labels.extend(y.detach().cpu().numpy())
-                        all_logits.append(out.detach().cpu().numpy())
+                    # 🔹 예측/정답/로짓 저장 (CPU로 변환)
+                    all_preds.extend(preds.detach().cpu().numpy())
+                    all_labels.extend(y.detach().cpu().numpy())
+                    all_logits.append(out.detach().cpu().numpy())
 
             va_acc  = v_correct / max(1, v_total)
             va_loss = v_loss_sum / max(1, v_total)
@@ -448,15 +447,19 @@ def main():
             if va_top2 is not None:
                 print(f"      top-2: {va_top2:.4f} | top-3: {va_top3:.4f}")
 
-            if va_acc > best_acc:
+            
+            save_dir = "C:/Users/USER-PC/Desktop/deep/model_data"
+            os.makedirs(save_dir, exist_ok=True)
+            
+            if va_acc > best_acc + 1e-6: 
                 best_acc = va_acc
-                save_path = "C:/Users/USER-PC/Desktop/deep/model_data"
-                os.makedirs(save_path, exist_ok=True)
-                torch.save(model.state_dict(), f"{save_path}\\best_model_fold{fold}.pt")
-                print(f"💾 New best model saved! (acc={best_acc:.4f})")
+                save_path = os.path.join(save_dir, f"best_model_fold{fold}.pt")
+                torch.save(model.state_dict(), save_path)
+                print(f"New best model saved! (fold={fold}, acc={best_acc:.4f})")
+
 
             epoch_time = time.time() - epoch_start
-            print(f"⏱️  Epoch {epoch} 완료 (소요시간: {epoch_time:.2f}초)")
+            print(f"Epoch {epoch} 완료 (소요시간: {epoch_time:.2f}초)")
 
         # --- (4) Fold 종료 처리 (fold ‘안’) ---
         fold_time = time.time() - fold_start
@@ -476,7 +479,7 @@ def main():
 
     torch.save(model.state_dict(), "best_model.pt")
 
-"""
+
 if __name__ == "__main__":
     torch.multiprocessing.set_start_method("spawn", force=True)
     main()
