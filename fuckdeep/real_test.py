@@ -1,6 +1,3 @@
-# -*- coding: utf-8 -*-
-# 최종 추론 스크립트 (CMTClassifier + 안전 로드 + 이미지 로딩 우회 + 정규화 일치)
-
 from test_copy import CMTClassifier
 import os
 import torch
@@ -15,7 +12,7 @@ import numpy as np
 # ======================
 DATASET_DIR = "C:/Users/USER-PC/Desktop/deep"  # save_to_disk 폴더
 CKPT_PATH   = "C:/Users/USER-PC/Desktop/deep/model_data/best_model_fold2.pt"
-TEST_IMAGE  = "C:/Users/USER-PC/Pictures/Saved Pictures/3.jpg"  # 테스트용 이미지
+TEST_IMAGE  = "C:/Users/USER-PC/Pictures/Saved Pictures/v.jpg"  # 테스트용 이미지
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 print("device:", device)
