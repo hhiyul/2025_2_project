@@ -12,131 +12,13 @@ import math
 import time
 from typing import Optional, Tuple, Dict
 import torch.nn.functional as F
-from sklearn.metrics import f1_score
-
-#save_path = ('G:\내 드라이브\2025_2_project') 학습 결과물 저장경로임
-#os.makedirs(save_path, exist_ok=True) 이것도
+from sklearn.metrics import f1_score, classification_report, confusion_matrix, balanced_accuracy_score, top_k_accuracy_score
+from datasets import load_from_disk
+from torch.autograd import Variable
+from collections import Counter
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-# ----------------------------------- 전처리 파트 ∨--------------------------------------
-def prepare_dataset():
-    dataset = load_dataset("Densu341/Fresh-rotten-fruit")
 
-    # 1️⃣ 제거할 라벨 설정
-    remove_labels = [18, 20, 16, 13, 2, 5, 7, 9]
-    labels = np.array(dataset["train"]["label"])
-    mask = ~np.isin(labels, remove_labels)
-
-    # 2️⃣ 필요 없는 라벨 제거
-    clean_dataset = dataset["train"].select(np.where(mask)[0])
-
-    # 3️⃣ Train/Val 분할
-    dataset = clean_dataset.train_test_split(test_size=0.2)
-    train_dataset, val_dataset = dataset["train"], dataset["test"]
-
-    # 4️⃣ 실제 남은 라벨 및 이름 정리
-    unique_labels = sorted(set(train_dataset["label"]) | set(val_dataset["label"]))
-    all_labels = [train_dataset.features["label"].int2str(i) for i in unique_labels]
-
-    new_classlabel = ClassLabel(num_classes=len(all_labels), names=all_labels)
-
-    # 5️⃣ 라벨 값 재매핑
-    def remap_labels(example):
-        label_name = train_dataset.features["label"].int2str(example["label"])
-        example["label"] = all_labels.index(label_name)
-        return example
-
-    print("🔁 Remapping labels...")
-    train_dataset = train_dataset.map(
-        remap_labels,
-        num_proc=os.cpu_count() // 2,          # CPU 절반 병렬 처리
-        load_from_cache_file=True,
-        desc="Remapping train labels"
-    )
-    val_dataset = val_dataset.map(
-        remap_labels,
-        num_proc=os.cpu_count() // 2,
-        load_from_cache_file=True,
-        desc="Remapping val labels"
-    )
-
-    train_dataset = train_dataset.cast_column("label", new_classlabel)
-    val_dataset   = val_dataset.cast_column("label", new_classlabel)
-
-    # 6️⃣ 이미지 RGB 고정
-    def to_rgb(example):
-        img = example["image"]
-        if img.mode != "RGB":
-            img = img.convert("RGB")
-        example["image"] = img
-        return example
-
-    print("🎨 Converting to RGB (parallel, 1회 실행)...")
-    train_dataset = train_dataset.map(
-        to_rgb,
-        num_proc=os.cpu_count() // 2,          # 멀티코어 변환
-        load_from_cache_file=True,
-        desc="Converting train RGB"
-    )
-    val_dataset = val_dataset.map(
-        to_rgb,
-        num_proc=os.cpu_count() // 2,
-        load_from_cache_file=True,
-        desc="Converting val RGB"
-    )
-
-    # 7️⃣ 🔥 Transform + Tensor 캐싱
-    def map_train_tf(example):
-        example["image"] = train_transform(example["image"])
-        return example
-
-    def map_val_tf(example):
-        example["image"] = val_transform(example["image"])
-        return example
-
-    print("⚙️ Applying transforms & caching tensors...")
-    train_dataset = train_dataset.map(
-        map_train_tf,
-        num_proc=os.cpu_count() // 2,          # 💥 CPU 병렬처리
-        batched=False,                         # PIL 변환은 단일 샘플 처리
-        load_from_cache_file=True,             # 기존 캐시 있으면 재활용
-        desc="Transforming train images"
-    )
-    val_dataset = val_dataset.map(
-        map_val_tf,
-        num_proc=os.cpu_count() // 2,
-        batched=False,
-        load_from_cache_file=True,
-        desc="Transforming val images"
-    )
-
-    # 8️⃣ Tensor 형식 지정 (HuggingFace → PyTorch용)
-    train_dataset.set_format(type="torch", columns=["image", "label"])
-    val_dataset.set_format(type="torch", columns=["image", "label"])
-
-    print("✅ Dataset ready! (Tensor cached)")
-    return DatasetDict({
-        "train": train_dataset,
-        "test":  val_dataset
-    })
-
-train_transform = transforms.Compose([
-    transforms.Resize((224,224)),
-    transforms.RandomHorizontalFlip(),
-    transforms.RandomRotation(15),
-    transforms.ToTensor(),
-    transforms.Normalize([0.485,0.456,0.406],
-                         [0.229,0.224,0.225])
-])
-
-val_transform = transforms.Compose([
-    transforms.Resize((224,224)),
-    transforms.ToTensor(),
-    transforms.Normalize([0.485,0.456,0.406],
-                         [0.229,0.224,0.225])
-])
-
-# -------------------------------------------------- 전처리 파트 ^------------------------------------------------
 # PyTorch Dataset 래퍼
 # --------------------------------------------------
 class FruitHFDataset(Dataset):
@@ -358,13 +240,78 @@ class CMTClassifier(nn.Module):
         logits = self.fc(x)
         return logits
 # ------------------------------------------------------------      
-# 4) 3-Fold 분할 & 학습 루프
+# 손실함수 클래스
+
+
+class FocalLoss(nn.Module):
+    """
+    Multi-class Focal Loss with per-class alpha.
+    - inputs: logits (B, C)
+    - targets: int labels (B,)
+    """
+    def __init__(self, alpha=None, gamma=2.0, reduction="mean", eps=1e-8):
+        super().__init__()
+        self.gamma = float(gamma)
+        self.reduction = reduction
+        self.eps = float(eps)
+
+        if alpha is not None:
+            alpha = torch.as_tensor(alpha, dtype=torch.float32)
+        self.register_buffer("alpha", alpha if alpha is not None else None)
+
+    def forward(self, inputs, targets):
+        # logits -> log-prob/prob
+        log_probs = F.log_softmax(inputs, dim=1)   # (B, C)
+        probs     = log_probs.exp()                # (B, C)
+
+        targets = targets.long()
+        log_pt  = log_probs.gather(1, targets.unsqueeze(1)).squeeze(1)  # (B,)
+        pt      = probs.gather(1, targets.unsqueeze(1)).squeeze(1)      # (B,)
+
+        # --- 수치 안정화 ---
+        pt = pt.clamp(min=self.eps, max=1. - self.eps)
+        # log_pt는 log_softmax 결과라 이미 안정적이지만, 혹시 모를 NaN 방지:
+        log_pt = torch.log(pt)
+
+        # alpha_t
+        if self.alpha is not None:
+            alpha_t = self.alpha[targets]  # (B,)
+        else:
+            alpha_t = torch.ones_like(pt)
+
+        # focal term
+        focal = (1.0 - pt).pow(self.gamma)
+        loss  = -alpha_t * focal * log_pt
+
+        if self.reduction == "mean":
+            return loss.mean()
+        elif self.reduction == "sum":
+            return loss.sum()
+        return loss
 # ------------------------------------------------------------
+# 메인
 def main():
-    final_dataset = prepare_dataset()
-    EPOCHS = 5
+    final_dataset = load_from_disk("C:/Users/USER-PC/Desktop/deep") #직접 저장한 전처리 데이터셋사용
+
+    num_classes = len(final_dataset["train"].features["label"].names)
+    train_labels = [int(x) for x in final_dataset["train"]["label"]]
+    counts = Counter(train_labels)
+    class_counts = [counts[i] for i in range(num_classes)]
+
+    beta = 0.999
+    effective_num = [1.0 - (beta ** c) for c in class_counts]
+    raw_alpha = torch.tensor(
+        [(1.0 - beta) / (en if en > 0 else 1e-8) for en in effective_num],
+        dtype=torch.float32
+    )
+    alpha = (raw_alpha / raw_alpha.sum()) * num_classes
+    print("alpha:", alpha)
+
+
+    EPOCHS = 10
     BATCH_SIZE = 128  #데스크탑은 128로
     K = 3
+    best_acc = 0.0
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("device:", device, flush=True)
@@ -379,7 +326,9 @@ def main():
     start_time = time.time()
     num_classes = len(final_dataset["train"].features["label"].names)
 
+    print(num_classes)
 
+    """
     for fold, (train_idx, val_idx) in enumerate(skf.split(indices, labels), 1):
         print(f"\n================ Fold {fold}/{K} 시작 ================")
         fold_start = time.time()
@@ -388,13 +337,13 @@ def main():
         train_split = final_dataset["train"].select(list(train_idx))
         val_split   = final_dataset["train"].select(list(val_idx))
 
-        train_ds = FruitHFDataset(train_split, transform=train_transform)
-        val_ds   = FruitHFDataset(val_split,   transform=val_transform)
+        train_ds = FruitHFDataset(train_split)
+        val_ds   = FruitHFDataset(val_split)
 
         train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True,
-                                num_workers=4, pin_memory=True, persistent_workers=False, prefetch_factor=2)
+                                num_workers=6, pin_memory=True, persistent_workers=False, prefetch_factor=2)
         val_loader   = DataLoader(val_ds,   batch_size=BATCH_SIZE, shuffle=False,
-                                num_workers=4, pin_memory=True, persistent_workers=False, prefetch_factor=2)
+                                num_workers=6, pin_memory=True, persistent_workers=False, prefetch_factor=2)
         
         #병목인지 확인하는 코드임---------------------
         loader_start = time.time()
@@ -403,16 +352,20 @@ def main():
                 break
         print(f"첫 10 batch 로딩 시간: {time.time() - loader_start:.2f}초")
         #--------------------------------------------
+
         torch.backends.cudnn.benchmark = True
 
-        # --- 모델/손실/옵티마이저 ---
+        # --- 모델/손실/옵티마이저 -----------------------------------------------------------------------
         model = CMTClassifier(num_classes).to(device)
-        criterion = nn.CrossEntropyLoss()
-        optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+        criterion = FocalLoss(alpha=alpha.to(device), gamma=2.0).to(device) #손실함수로 focal loss 사용함
+        optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4) #옵티마이저는 AdamW 사용
 
         scaler = GradScaler()
 
+                
         val_acc_list = []
+        val_loss_list = []
+        val_f1_list   = []
 
         # --- Epoch 루프 ---
         for epoch in range(1, EPOCHS+1):
@@ -454,6 +407,8 @@ def main():
             model.eval()
             v_total = v_correct = 0
             v_loss_sum = 0.0
+
+            all_preds, all_labels, all_logits = [], [], []
             with torch.no_grad():
                 with autocast("cuda"):
                     for x, y in tqdm(val_loader, desc=f"Fold {fold} Epoch {epoch} [Val]", ncols=100):
@@ -464,13 +419,41 @@ def main():
                         loss = criterion(out, y)
 
                         v_loss_sum += loss.item() * x.size(0)
-                        v_correct  += (out.argmax(1) == y).sum().item()
-                        v_total    += x.size(0)
+                        preds = out.argmax(1)
+                        v_correct += (preds == y).sum().item()
+                        v_total += x.size(0)
 
-                    va_acc  = v_correct / max(1, v_total)
-                    va_loss = v_loss_sum / max(1, v_total)
-                    val_acc_list.append(va_acc)
-                    print(f"Val ▶ acc: {va_acc:.4f} | loss: {va_loss:.4f}")
+                        # 🔹 예측/정답/로짓 저장 (CPU로 변환)
+                        all_preds.extend(preds.detach().cpu().numpy())
+                        all_labels.extend(y.detach().cpu().numpy())
+                        all_logits.append(out.detach().cpu().numpy())
+
+            va_acc  = v_correct / max(1, v_total)
+            va_loss = v_loss_sum / max(1, v_total)
+            all_logits = np.concatenate(all_logits, axis=0)
+            va_f1   = f1_score(all_labels, all_preds, average="macro")
+            va_bal  = balanced_accuracy_score(all_labels, all_preds)
+
+            try:
+                va_top2 = top_k_accuracy_score(all_labels, all_logits, k=2, labels=np.arange(all_logits.shape[1]))
+                va_top3 = top_k_accuracy_score(all_labels, all_logits, k=3, labels=np.arange(all_logits.shape[1]))
+            except Exception:
+                va_top2 = va_top3 = None
+
+    
+            val_acc_list.append(va_acc)
+            val_loss_list.append(va_loss)
+            val_f1_list.append(va_f1)
+            print(f"Val ▶ acc: {va_acc:.4f} | f1: {va_f1:.4f} | bal_acc: {va_bal:.4f} | loss: {va_loss:.4f}")
+            if va_top2 is not None:
+                print(f"      top-2: {va_top2:.4f} | top-3: {va_top3:.4f}")
+
+            if va_acc > best_acc:
+                best_acc = va_acc
+                save_path = "C:/Users/USER-PC/Desktop/deep/model_data"
+                os.makedirs(save_path, exist_ok=True)
+                torch.save(model.state_dict(), f"{save_path}\\best_model_fold{fold}.pt")
+                print(f"💾 New best model saved! (acc={best_acc:.4f})")
 
             epoch_time = time.time() - epoch_start
             print(f"⏱️  Epoch {epoch} 완료 (소요시간: {epoch_time:.2f}초)")
@@ -479,10 +462,6 @@ def main():
         fold_time = time.time() - fold_start
         print(f"✅ Fold {fold} 완료! (소요시간: {fold_time/60:.2f}분)")
         fold_accs.append(val_acc_list)
-
-        #save_path = ('G:\내 드라이브\2025_2_project')  # 드라이브에 훈련결과 넣는 코드
-        #os.makedirs(save_path, exist_ok=True)
-        #torch.save(model.state_dict(), f"{save_path}\\best_model_fold{fold}.pt")
 
     # --- (5) 전체 요약 (fold ‘바깥’) ---
     total_time = time.time() - start_time
@@ -495,7 +474,9 @@ def main():
     mean_acc = sum(best_accs) / len(best_accs)
     print(f"평균 val_acc = {mean_acc:.4f}")
 
+    torch.save(model.state_dict(), "best_model.pt")
 
+"""
 if __name__ == "__main__":
     torch.multiprocessing.set_start_method("spawn", force=True)
     main()

@@ -1,0 +1,52 @@
+from datasets import load_from_disk
+
+import torch
+from torchvision import transforms
+import matplotlib.pyplot as plt
+from PIL import Image
+
+
+# 데이터셋 멀쩡한지 확인 하는 파일
+dataset = load_from_disk("C:/Users/USER-PC/Desktop/deep")
+
+
+unnormalize = transforms.Normalize(
+    mean=[-0.485/0.229, -0.456/0.224, -0.406/0.225],
+    std=[1/0.229, 1/0.224, 1/0.225]
+)
+
+to_pil = transforms.ToPILImage()
+
+# 3. 10개 샘플 출력
+plt.figure(figsize=(15, 6))
+for i in range(10):
+    example = dataset["train"][i]
+    img = example["image"]
+    label = example["label"]
+
+    # 라벨이 tensor(5) 형태면 int로 변환
+    if isinstance(label, torch.Tensor):
+        label = label.item()
+
+    # 라벨 이름 변환
+    label_name = dataset["train"].features["label"].int2str(label)
+
+    # 이미지 타입에 따라 복원
+    if isinstance(img, dict) and "array" in img:
+        img = Image.fromarray(img["array"])
+    elif isinstance(img, torch.Tensor):
+        # 3차원 텐서인지 확인
+        if img.ndim == 3:
+            img = unnormalize(img).clamp(0, 1)
+            img = to_pil(img)
+    else:
+        # 혹시 다른 타입이면 PIL 변환 시도
+        img = Image.fromarray(np.array(img))
+
+    plt.subplot(2, 5, i + 1)
+    plt.imshow(img)
+    plt.title(label_name, fontsize=10)
+    plt.axis("off")
+
+plt.tight_layout()
+plt.show()
