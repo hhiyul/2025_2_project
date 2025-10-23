@@ -17,6 +17,8 @@ from datasets import load_from_disk
 from torch.autograd import Variable
 from collections import Counter
 
+import json, os
+
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 train_transform = transforms.Compose([
@@ -42,34 +44,35 @@ val_transform = transforms.Compose([
 def prepare_dataset():
     dataset = load_dataset("Densu341/Fresh-rotten-fruit")
 
-    # 1) 라벨 제거 → 2) split → 3) 라벨 재매핑 → 4) RGB 고정
-    # (당신 코드 그대로 유지)
+    # 1) 라벨 제거
     remove_labels = [18, 20, 16, 13, 2, 5, 7, 9]
     labels = np.array(dataset["train"]["label"])
     mask = ~np.isin(labels, remove_labels)
-    clean_dataset = dataset["train"].select(np.where(mask)[0])
+    clean = dataset["train"].select(np.where(mask)[0])
 
-    dataset = clean_dataset.train_test_split(test_size=0.2, seed=42)
-    train_dataset, val_dataset = dataset["train"], dataset["test"]
+    # 2) split (결정적)
+    split = clean.train_test_split(test_size=0.2, seed=42)
+    train_ds, val_ds = split["train"], split["test"]
 
-    unique_labels = sorted(set(train_dataset["label"]) | set(val_dataset["label"]))
-    all_labels = [train_dataset.features["label"].int2str(i) for i in unique_labels]
-    new_classlabel = ClassLabel(num_classes=len(all_labels), names=all_labels)
+    # 3) 라벨 재매핑 (이름 기준으로 0..C-1)
+    uniq = sorted(set(train_ds["label"]) | set(val_ds["label"]))
+    names = [train_ds.features["label"].int2str(i) for i in uniq]
+    new_lbl = ClassLabel(num_classes=len(names), names=names)
 
-    def remap_labels(example):
-        label_name = train_dataset.features["label"].int2str(example["label"])
-        example["label"] = all_labels.index(label_name)
+    def remap(example):
+        name = train_ds.features["label"].int2str(example["label"])
+        example["label"] = names.index(name)
         return example
 
-    train_dataset = train_dataset.map(remap_labels, num_proc=os.cpu_count()//2, load_from_cache_file=True, desc="Remapping train labels")
-    val_dataset   = val_dataset.map(remap_labels,   num_proc=os.cpu_count()//2, load_from_cache_file=True, desc="Remapping val labels")
+    train_ds = train_ds.map(remap, num_proc=os.cpu_count()//2,
+                            load_from_cache_file=True, desc="Remap train")
+    val_ds   = val_ds.map(remap,   num_proc=os.cpu_count()//2,
+                            load_from_cache_file=True, desc="Remap val")
 
-    train_dataset = train_dataset.cast_column("label", new_classlabel)
-    val_dataset   = val_dataset.cast_column("label",   new_classlabel)
+    train_ds = train_ds.cast_column("label", new_lbl)
+    val_ds   = val_ds.cast_column("label",  new_lbl)
 
-    # ---- 결정적 처리 ----
-
-    # 6) 이미지 RGB 고정 (결정적)
+    # 4) RGB 통일 (결정적)
     def to_rgb(example):
         img = example["image"]
         if img.mode != "RGB":
@@ -77,45 +80,39 @@ def prepare_dataset():
         example["image"] = img
         return example
 
-    train_dataset = train_dataset.map(to_rgb, num_proc=os.cpu_count()//2, load_from_cache_file=True, desc="Converting train RGB")
-    val_dataset   = val_dataset.map(to_rgb,   num_proc=os.cpu_count()//2, load_from_cache_file=True, desc="Converting val RGB")
+    train_ds = train_ds.map(to_rgb, num_proc=os.cpu_count()//2,
+                            load_from_cache_file=True, desc="RGB train")
+    val_ds   = val_ds.map(to_rgb,   num_proc=os.cpu_count()//2,
+                            load_from_cache_file=True, desc="RGB val")
 
-
-    # ✅ 런타임 증강으로 옮기기 (배치 단위)
-    def apply_train_tf(batch):
-        batch["image"] = [train_transform(img) for img in batch["image"]]
-        return batch
-
-    def apply_val_tf(batch):
-        batch["image"] = [val_transform(img) for img in batch["image"]]
-        return batch
-
-    train_dataset.set_transform(apply_train_tf)
-    val_dataset.set_transform(apply_val_tf)
-
-    final_dataset = DatasetDict({"train": train_dataset, "test": val_dataset})
-
-    return final_dataset
-
-
-
-
-
-
+    # ✅ 여기서 끝! set_transform 안 씀
+    return DatasetDict({"train": train_ds, "test": val_ds})
 
 
 # PyTorch Dataset 래퍼
 # --------------------------------------------------
 class FruitHFDataset(Dataset):
-    def __init__(self, hf_dataset):
-        self.dataset = hf_dataset
+    def __init__(self, hf_dataset, transform=None):
+        self.ds = hf_dataset
+        self.tf = transform
 
     def __len__(self):
-        return len(self.dataset)
+        return len(self.ds)
 
     def __getitem__(self, idx):
-        item = self.dataset[idx]
-        return item["image"], int(item["label"])
+        item = self.ds[idx]            # image: PIL.Image, label: int
+        img  = item["image"]
+        if self.tf is not None:
+            img = self.tf(img)         # Tensor(C,H,W)
+        label = item["label"]
+        # long 보장
+        import torch
+        if not torch.is_tensor(label):
+            import torch
+            label = torch.tensor(label, dtype=torch.long)
+        else:
+            label = label.to(dtype=torch.long)
+        return img, label
 
 
 # ------------------------------------------------------------
@@ -376,24 +373,36 @@ class FocalLoss(nn.Module):
 # ------------------------------------------------------------
 # 메인
 def main():
-    final_dataset = prepare_dataset() #직접 저장한 전처리 데이터셋사용
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print("device:", device)
+    if torch.cuda.is_available():
+        print(torch.cuda.get_device_name(0))
 
+    final_dataset = prepare_dataset()
+
+    names = final_dataset["train"].features["label"].names
+    save_dir = "C:/Users/USER-PC/Desktop/deep/model_data"
+    os.makedirs(save_dir, exist_ok=True)
+    with open(os.path.join(save_dir, "label_names.json"), "w", encoding="utf-8") as f:
+        json.dump(names, f, ensure_ascii=False)
+
+        
     num_classes = len(final_dataset["train"].features["label"].names)
+
+    # ----- class-balanced alpha (FocalLoss용) -----
     train_labels = [int(x) for x in final_dataset["train"]["label"]]
     counts = Counter(train_labels)
     class_counts = [counts[i] for i in range(num_classes)]
 
     beta = 0.999
     effective_num = [1.0 - (beta ** c) for c in class_counts]
-    raw_alpha = torch.tensor(
-        [(1.0 - beta) / (en if en > 0 else 1e-8) for en in effective_num],
-        dtype=torch.float32
-    )
+    raw_alpha = torch.tensor([(1.0 - beta) / (en if en > 0 else 1e-8)
+                              for en in effective_num], dtype=torch.float32)
     alpha = (raw_alpha / raw_alpha.sum()) * num_classes
-    print("alpha:", alpha)
+    print("alpha:", alpha.tolist())
 
 
-    EPOCHS = 10
+    EPOCHS = 5
     BATCH_SIZE = 128  #데스크탑은 128로
     K = 3
     best_acc = 0.0
@@ -420,8 +429,8 @@ def main():
         train_split = final_dataset["train"].select(list(train_idx))
         val_split   = final_dataset["train"].select(list(val_idx))
 
-        train_ds = FruitHFDataset(train_split)
-        val_ds   = FruitHFDataset(val_split)
+        train_ds = FruitHFDataset(final_dataset["train"], transform=train_transform)
+        val_ds   = FruitHFDataset(final_dataset["test"],  transform=val_transform)
 
         train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True,
                                 num_workers=6, pin_memory=True, persistent_workers=False, prefetch_factor=2)
@@ -493,7 +502,7 @@ def main():
 
             all_preds, all_labels, all_logits = [], [], []
             with torch.inference_mode():
-                for x, y in val_loader:
+                 for x, y in tqdm(val_loader, desc=f"Fold {fold} Epoch {epoch} [Val]", ncols=100):
                     x = x.to(device, non_blocking=True)
                     y = y.to(device, non_blocking=True)
 

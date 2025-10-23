@@ -1,134 +1,119 @@
-from test_copy import CMTClassifier
-import os
+import os, json, glob
 import torch
 import torch.nn.functional as F
-from torchvision import transforms
 from PIL import Image
-from datasets import load_from_disk
-from collections import OrderedDict
+from torch.utils.data import Dataset, DataLoader
+from torchvision import transforms
+from torchvision.transforms import InterpolationMode
 
-import numpy as np
-# 경로/디바이스 설정
-# ======================
-DATASET_DIR = "C:/Users/USER-PC/Desktop/deep"  # save_to_disk 폴더
-CKPT_PATH   = "C:/Users/USER-PC/Desktop/deep/model_data/best_model_fold2.pt"
+from test_copy import CMTClassifier, prepare_dataset   # prepare_dataset은 ②방법 쓸 때만 필요
+
+CKPT_PATH   = "C:/Users/USER-PC/Desktop/deep/model_data/best_model_fold1.pt"
 TEST_IMAGE  = "C:/Users/USER-PC/Pictures/Saved Pictures/v.jpg"  # 테스트용 이미지
+LABEL_JSON  = "C:/Users/USER-PC/Desktop/deep/model_data/label_names.json" 
 
-device = "cuda" if torch.cuda.is_available() else "cpu"
-print("device:", device)
+with open(LABEL_JSON, "r", encoding="utf-8") as f:
+    label_names = json.load(f)
+TEST_DIR    = None  # r"C:\path\to\test_images"  # 폴더 단위 추론하고 싶으면 경로 넣기
 
-# ======================
-# 1) 라벨 정의 로드 (훈련 시 사용했던 데이터셋 그대로)
-# ======================
-final_dataset = load_from_disk(DATASET_DIR)
-label_names = final_dataset["train"].features["label"].names
-num_classes = len(label_names)
-print(f"num_classes (from dataset) = {num_classes}")
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# ======================
-# 2) 체크포인트 안전 로드 (weights_only 우선, 실패 시 fallback)
-# ======================
-def load_state_dict_safely(path, map_location):
-    # 새 PyTorch(지원) → weights_only=True
+VAL_TF = transforms.Compose([
+    transforms.Resize(256),
+    transforms.CenterCrop(224),
+    transforms.ToTensor(),
+    transforms.Normalize([0.485,0.456,0.406],
+                         [0.229,0.224,0.225])
+])
+# ===== 유틸 =====
+def safe_torch_load(path, map_location):
+    if not os.path.isfile(path) or os.path.getsize(path) < 1024:
+        raise RuntimeError(f"가중치 파일 이상: {path}")
     try:
         return torch.load(path, map_location=map_location, weights_only=True)
     except TypeError:
-        # 구버전 PyTorch → weights_only 인자 없음
-        sd = torch.load(path, map_location=map_location)
-        return sd["state_dict"] if isinstance(sd, dict) and "state_dict" in sd else sd
+        return torch.load(path, map_location=map_location)
 
-state_dict = load_state_dict_safely(CKPT_PATH, device)
+def get_label_names():
+    # ⚠️ 테스트에서는 prepare_dataset를 절대 호출하지 않음
+    if LABEL_JSON and os.path.isfile(LABEL_JSON):
+        with open(LABEL_JSON, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return None  # 없으면 인덱스로 출력
 
-# ======================
-# 3) (선택) ckpt의 최종 분류기 out_features 확인 → dataset 라벨 수와 일치 점검
-# ======================
-def detect_out_features(sd):
-    # 명시적 'fc.weight'가 있으면 그걸 사용
-    if "fc.weight" in sd and sd["fc.weight"].ndim == 2:
-        return sd["fc.weight"].shape[0]
-    # 백업: 2D weight 중 가장 마지막 후보를 사용(모델에 따라 다를 수 있어 참고용)
-    out = None
-    for k, v in sd.items():
-        if k.endswith("weight") and v.ndim == 2:
-            out = v.shape[0]
-    return out
+def infer_num_classes_from_state_dict(state):
+    for k, v in state.items():
+        if k.endswith("fc.weight") and v.ndim == 2:
+            return v.shape[0]
+    raise RuntimeError("fc.weight에서 클래스 수 추정 실패")
 
-ckpt_out_features = detect_out_features(state_dict)
-if ckpt_out_features is not None:
-    print("ckpt out_features =", ckpt_out_features)
-    if ckpt_out_features != num_classes:
-        print(f"⚠️ 경고: ckpt out_features({ckpt_out_features}) != dataset num_classes({num_classes})")
-        # 필요 시 여기서 강제 종료하거나, 라벨/모델을 일치시키도록 조정하세요.
+def predict_image(model, TEST_IMAGE, label_names):
+    if not os.path.isfile(TEST_IMAGE):
+        raise FileNotFoundError(TEST_IMAGE)
+    img = Image.open(TEST_IMAGE).convert("RGB")
+    x = VAL_TF(img).unsqueeze(0).to(device, non_blocking=True)
+    with torch.inference_mode():
+        probs = F.softmax(model(x), dim=1).squeeze(0)  # (C,)
+        conf, idx = probs.max(dim=0)
+    idx = int(idx.item()); conf = float(conf.item())
+    label = label_names[idx] if (label_names is not None and 0 <= idx < len(label_names)) else str(idx)
+    return label, conf
 
-# ======================
-# 4) 모델 생성 및 가중치 로드 (DataParallel 대비)
-# ======================
-model = CMTClassifier(num_classes).to(device).eval()
+IMG_EXTS = {".jpg",".jpeg",".png",".bmp",".webp"}
+def list_images(root):
+    paths = [p for p in glob.glob(os.path.join(root, "*")) if os.path.splitext(p.lower())[1] in IMG_EXTS]
+    paths.sort()
+    return paths
 
-try:
-    model.load_state_dict(state_dict, strict=True)
-    print("✅ strict=True 로드 성공")
-except RuntimeError as e:
-    print("strict=True 실패 → module. 접두사 제거 후 로드 시도:", e)
-    cleaned = OrderedDict((k.replace("module.", ""), v) for k, v in state_dict.items())
-    model.load_state_dict(cleaned, strict=False)
-    print("✅ strict=False 로드 성공 (module. 제거)")
+def predict_folder(model, folder_path: str, label_names, batch_size=128, num_workers=0, pin_memory=True):
+    # num_workers=0 권장(테스트 스크립트 안정성)
+    class FolderDS(Dataset):
+        def __init__(self, paths, tf):
+            self.paths = paths; self.tf = tf
+        def __len__(self): return len(self.paths)
+        def __getitem__(self, i):
+            p = self.paths[i]
+            x = VAL_TF(Image.open(p).convert("RGB"))
+            return x, p
 
-# ======================
-# 5) 전처리 (학습 시 val_transform과 동일)
-# ======================
-val_transform = transforms.Compose([
-    transforms.Resize((224, 224)),
-    transforms.ToTensor(),
-    transforms.Normalize([0.485,0.456,0.406],
-                         [0.229,0.224,0.225]),
-])
+    paths = list_images(folder_path)
+    ds = FolderDS(paths, VAL_TF)
+    loader = DataLoader(ds, batch_size=batch_size, shuffle=False,
+                        num_workers=num_workers, pin_memory=pin_memory)
+    results = []
+    with torch.inference_mode():
+        for x, ps in loader:
+            x = x.to(device, non_blocking=True)
+            probs = F.softmax(model(x), dim=1)
+            conf, idx = probs.max(dim=1)
+            for pth, i, c in zip(ps, idx.cpu().tolist(), conf.cpu().tolist()):
+                name = label_names[i] if (label_names is not None and 0 <= i < model.fc.out_features) else str(i)
+                results.append((pth, name, c))
+    return results
 
-# ======================
-# 6) 안전한 이미지 로더 (PIL → 실패 시 OpenCV 우회)
-# ======================
-def load_image_rgb(path: str) -> Image.Image:
-    # 1) PIL 시도
-    try:
-        img = Image.open(path).convert("RGB")
-        return img
-    except Exception as e_pil:
-        # 2) OpenCV 우회 (경로 인코딩/일부 코덱 문제 해결)
-        if cv2 is None:
-            raise e_pil
-        data = np.fromfile(path, dtype=np.uint8)   # Windows 경로 안전
-        img  = cv2.imdecode(data, cv2.IMREAD_COLOR)
-        if img is None:
-            raise e_pil   # 실제로 손상/미지원 포맷
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        return Image.fromarray(img)
+if __name__ == "__main__":  # ✅ Windows 멀티프로세싱 재실행 방지
+    print("device:", device)
 
-# ======================
-# 7) 예측 함수
-# ======================
-@torch.inference_mode()
-def predict_image(path: str):
-    if not os.path.isfile(path):
-        raise FileNotFoundError(f"파일이 존재하지 않습니다: {path}")
-    img = load_image_rgb(path)
-    x = val_transform(img).unsqueeze(0).to(device)  # [1,3,224,224]
-    logits = model(x)
-    probs = F.softmax(logits, dim=1)[0]
-    idx = int(probs.argmax().item())
-    return label_names[idx], float(probs[idx].item())
+    # 1️⃣ 가중치 로드
+    state = safe_torch_load(CKPT_PATH, device)
+    label_names = get_label_names()
+    
+    num_classes = len(label_names)
 
-# ======================
-# 8) 실행
-# ======================
-try:
-    label, prob = predict_image(TEST_IMAGE)
-    print(f"예측 결과: {label} ({prob*100:.2f}%)")
-except Exception as e:
-    print("❌ 추론 실패:", e)
-    # 추가 디버깅 힌트
-    try:
-        import pathlib
-        p = pathlib.Path(TEST_IMAGE)
-        print("exists:", p.exists(), " size:", p.stat().st_size if p.exists() else -1, " suffix:", p.suffix.lower())
-    except Exception:
-        pass
+    # 2️⃣ 모델 준비
+    model = CMTClassifier(num_classes=num_classes).to(device).eval()
+    missing, unexpected = model.load_state_dict(state, strict=False)
+    if missing or unexpected:
+        print("[경고] state_dict 키 불일치:", "missing:", missing, "unexpected:", unexpected)
+
+    # 3️⃣ 단일 이미지 추론  ✅ (model, TEST_IMAGE, label_names 모두 넘겨야 함)
+    if TEST_IMAGE:
+        lab, pr = predict_image(model, TEST_IMAGE, label_names)
+        print(f"[단일] {TEST_IMAGE} → {lab} ({pr*100:.2f}%)")
+"""
+# ===== 실행 예시 =====
+print("device:", device)
+if TEST_IMAGE:
+    lab, pr = predict_image(model, TEST_IMAGE, label_names)
+    print(f"[단일] {TEST_IMAGE} → {lab} ({pr*100:.2f}%)")
+    """
