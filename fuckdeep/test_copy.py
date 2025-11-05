@@ -381,7 +381,7 @@ def main():
     final_dataset = prepare_dataset()
 
     names = final_dataset["train"].features["label"].names
-    save_dir = "C:/Users/USER-PC/Desktop/deep/model_data"
+    save_dir = "C:/Users/rkdrn/Desktop/deep"
     os.makedirs(save_dir, exist_ok=True)
     with open(os.path.join(save_dir, "label_names.json"), "w", encoding="utf-8") as f:
         json.dump(names, f, ensure_ascii=False)
@@ -542,7 +542,7 @@ def main():
                 print(f"      top-2: {va_top2:.4f} | top-3: {va_top3:.4f}")
 
             
-            save_dir = "C:/Users/USER-PC/Desktop/deep/model_data"
+            save_dir = "C:/Users/rkdrn/Desktop/deep"
             os.makedirs(save_dir, exist_ok=True)
             
             if va_acc > best_acc + 1e-6: 

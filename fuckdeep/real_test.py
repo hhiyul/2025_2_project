@@ -8,9 +8,9 @@ from torchvision.transforms import InterpolationMode
 
 from test_copy import CMTClassifier, prepare_dataset   # prepare_dataset은 ②방법 쓸 때만 필요
 
-CKPT_PATH   = "C:/Users/USER-PC/Desktop/deep/model_data/best_model_fold1.pt"
-TEST_IMAGE  = "C:/Users/USER-PC/Pictures/Saved Pictures/v.jpg"  # 테스트용 이미지
-LABEL_JSON  = "C:/Users/USER-PC/Desktop/deep/model_data/label_names.json" 
+CKPT_PATH   = "C:/Users/rkdrn/Desktop/deep/best_model_fold1.pt"
+TEST_IMAGE  = "C:/Users/rkdrn/Desktop/tset/2.jpg"  # 테스트용 이미지
+LABEL_JSON  = "C:/Users/rkdrn/Desktop/deep/label_names.json" 
 
 with open(LABEL_JSON, "r", encoding="utf-8") as f:
     label_names = json.load(f)
