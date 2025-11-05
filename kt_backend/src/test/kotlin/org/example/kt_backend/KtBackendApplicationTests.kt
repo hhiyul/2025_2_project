@@ -1,13 +1,13 @@
-package com.example.deep_backend
+package org.example.kt_backend
 
 import org.junit.jupiter.api.Test
 import org.springframework.boot.test.context.SpringBootTest
 
 @SpringBootTest
-class DeepBackendApplicationTests {
+class KtBackendApplicationTests {
 
-	@Test
-	fun contextLoads() {
-	}
+    @Test
+    fun contextLoads() {
+    }
 
 }
