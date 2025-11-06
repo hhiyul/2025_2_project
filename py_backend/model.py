@@ -9,7 +9,6 @@ from torchvision import transforms
 
 
 class DropPath(nn.Module):
-    """Per-sample DropPath (Stochastic Depth)."""
 
     def __init__(self, drop_prob: float = 0.0) -> None:
         super().__init__()
