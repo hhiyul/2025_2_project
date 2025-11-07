@@ -14,7 +14,7 @@ from fastapi import FastAPI, File, HTTPException, UploadFile
 from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel
 
-from .model import VAL_TRANSFORM, load_cmt_model
+from model import VAL_TRANSFORM, load_cmt_model
 
 
 logger = logging.getLogger(__name__)
