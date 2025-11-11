@@ -90,13 +90,13 @@ class MLP(nn.Module):
 
 class TransformerBlock(nn.Module):
     def __init__(
-        self,
-        dim: int,
-        num_heads: int,
-        mlp_ratio: float = 3.0,
-        attn_drop: float = 0.0,
-        proj_drop: float = 0.1,
-        drop_path: float = 0.0,
+            self,
+            dim: int,
+            num_heads: int,
+            mlp_ratio: float = 3.0,
+            attn_drop: float = 0.0,
+            proj_drop: float = 0.1,
+            drop_path: float = 0.0,
     ) -> None:
         super().__init__()
         self.norm1 = nn.LayerNorm(dim, eps=1e-6)
@@ -116,23 +116,23 @@ class TransformerBlock(nn.Module):
 
 class CMTClassifier(nn.Module):
     def __init__(
-        self,
-        num_classes: int,
-        stem_channels: int = 64,
-        c_stage1: int = 96,
-        c_stage2: int = 128,
-        c_stage3: int = 160,
-        t_dim1: int = 256,
-        t_heads1: int = 4,
-        t_depth1: int = 3,
-        t_mlp1: float = 3.0,
-        t_dim2: int = 384,
-        t_heads2: int = 6,
-        t_depth2: int = 6,
-        t_mlp2: float = 3.5,
-        attn_drop: float = 0.0,
-        proj_drop: float = 0.1,
-        drop_path_rate: float = 0.0,
+            self,
+            num_classes: int,
+            stem_channels: int = 64,
+            c_stage1: int = 96,
+            c_stage2: int = 128,
+            c_stage3: int = 160,
+            t_dim1: int = 256,
+            t_heads1: int = 4,
+            t_depth1: int = 3,
+            t_mlp1: float = 3.0,
+            t_dim2: int = 384,
+            t_heads2: int = 6,
+            t_depth2: int = 6,
+            t_mlp2: float = 3.5,
+            attn_drop: float = 0.0,
+            proj_drop: float = 0.1,
+            drop_path_rate: float = 0.0,
     ) -> None:
         super().__init__()
         self.num_classes = num_classes
@@ -257,9 +257,9 @@ def _extract_state_dict(checkpoint: object) -> dict[str, torch.Tensor]:
 
 
 def load_cmt_model(
-    model_path: Path,
-    num_classes: int,
-    device: torch.device,
+        model_path: Path,
+        num_classes: int,
+        device: torch.device,
 ) -> Tuple[nn.Module, Iterable[str], Iterable[str]]:
     checkpoint = torch.load(model_path, map_location=device)
 
