@@ -215,7 +215,7 @@ class CMTClassifier(nn.Module):
         x = self.to_embed1(x)
 
         x = self.lpu1(x)
-        bsz, channels, height, width = x.shape
+        bsz, channels, height, width = x.shape  #원본코드랑 변수명 조금씩 다름
         x = x.flatten(2).transpose(1, 2)
         x = self.trans1(x)
         x = x.transpose(1, 2).view(bsz, channels, height, width)

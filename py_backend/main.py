@@ -16,7 +16,7 @@ from pydantic import BaseModel
 
 from models import VAL_TRANSFORM, load_cmt_model
 
-
+#uvicorn py_backend.main:app --host 0.0.0.0 --port 8000 --reload
 logger = logging.getLogger(__name__)
 
 
