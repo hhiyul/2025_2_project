@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Iterable, Tuple
+from typing import Iterable, Tuple, Dict
 
 import torch
 from torch import nn
@@ -256,26 +256,100 @@ def _extract_state_dict(checkpoint: object) -> dict[str, torch.Tensor]:
     return checkpoint  # type: ignore[return-value]
 
 
-def load_cmt_model(
-        model_path: Path,
-        num_classes: int,
-        device: torch.device,
-) -> Tuple[nn.Module, Iterable[str], Iterable[str]]:
-    checkpoint = torch.load(model_path, map_location=device)
+def load_cmt_model(model_path: Path, num_classes: int, device: torch.device) -> Tuple[nn.Module, Tuple[str, ...], Tuple[str, ...]]:
+    """
+    - 체크포인트의 다양한 형태(dict/nn.Module) 지원
+    - DataParallel 등의 'module.' 접두사 제거
+    - stage*.ds.*  <->  stage*.downsample.* 키 자동 리매핑
+    - 먼저 strict=True로 로드 → 실패 시 리매핑 시도 → 그래도 안 되면 오류 메시지에 누락/예상치 못한 키를 자세히 포함
+    - fc(out_features)와 num_classes 불일치 시 명확한 예외
+    """
+    ckpt = torch.load(model_path, map_location=device)
 
-    if isinstance(checkpoint, nn.Module):
-        model = checkpoint.to(device)
-        model.eval()
-        return model, (), ()
+    def _extract_state_dict(obj) -> Dict[str, torch.Tensor]:
+        if isinstance(obj, nn.Module):
+            return obj.state_dict()
+        if not isinstance(obj, dict):
+            raise TypeError(f"Unsupported checkpoint type: {type(obj)}")
+        for key in ("model_state_dict", "state_dict", "model"):
+            v = obj.get(key)
+            if isinstance(v, dict):
+                return v
+        return obj  # raw state_dict
 
-    state_dict = _extract_state_dict(checkpoint)
+    def _strip_module_prefix(sd: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        # 'module.'로 시작하면 제거
+        if any(k.startswith("module.") for k in sd.keys()):
+            return {k.replace("module.", "", 1): v for k, v in sd.items()}
+        return sd
 
+    def _remap_ds_downsample(sd: Dict[str, torch.Tensor], to: str) -> Dict[str, torch.Tensor]:
+        """
+        to == 'downsample' : stage*.ds.* -> stage*.downsample.*
+        to == 'ds'         : stage*.downsample.* -> stage*.ds.*
+        """
+        out = {}
+        for k, v in sd.items():
+            if to == "downsample":
+                k2 = (k.replace("stage1.ds.", "stage1.downsample.")
+                      .replace("stage2.ds.", "stage2.downsample.")
+                      .replace("stage3.ds.", "stage3.downsample."))
+            else:
+                k2 = (k.replace("stage1.downsample.", "stage1.ds.")
+                      .replace("stage2.downsample.", "stage2.ds.")
+                      .replace("stage3.downsample.", "stage3.ds."))
+            out[k2] = v
+        return out
+
+    # 1) state_dict 정규화
+    sd = _extract_state_dict(ckpt)
+    sd = _strip_module_prefix(sd)
+
+    # 2) 모델 생성
     model = CMTClassifier(num_classes=num_classes)
-    missing, unexpected = model.load_state_dict(state_dict, strict=False)
-    model.to(device)
-    model.eval()
-    return model, missing, unexpected
 
+    # 3) fc(out_features)와 num_classes 일치 검증 (실패 시 바로 알려줌)
+    fc_out = getattr(model, "fc", None)
+    if hasattr(fc_out, "out_features") and fc_out.out_features != num_classes:
+        raise ValueError(
+            f"[load_cmt_model] num_classes({num_classes}) != model.fc.out_features({fc_out.out_features}). "
+            "훈련 당시 라벨 개수/순서와 현재 labels.json이 다른지 확인하세요."
+        )
+
+    # 4) 우선 strict=True로 그대로 시도
+    try:
+        model.load_state_dict(sd, strict=True)
+        model.to(device).eval()
+        return model, (), ()
+    except RuntimeError as e1:
+        # 5) 키 패턴 보고 리매핑 방향 결정
+        keys = list(sd.keys())
+        has_ds = any(".ds." in k for k in keys)
+        has_down = any(".downsample." in k for k in keys)
+
+        # 현재 코드가 downsample를 쓰는 경우가 대부분이므로, 체크포인트가 ds면 downsample로 리매핑
+        if has_ds and not has_down:
+            sd2 = _remap_ds_downsample(sd, to="downsample")
+        elif has_down and not has_ds:
+            # 혹시 반대 상황이면 반대로
+            sd2 = _remap_ds_downsample(sd, to="ds")
+        else:
+            sd2 = sd  # 패턴 판별 불가 → 원본 유지
+
+        try:
+            model.load_state_dict(sd2, strict=True)
+            model.to(device).eval()
+            return model, (), ()
+        except RuntimeError as e2:
+            # 6) 디버그용으로 missing/unexpected 키를 뽑아주기 위해 strict=False로 한 번 계산
+            missing, unexpected = model.load_state_dict(sd2, strict=False)
+            # 더 명확한 에러 메시지로 실패 이유 전달
+            raise RuntimeError(
+                "[load_cmt_model] state_dict 로딩 실패\n"
+                f"- 1차(strict=True, 원본) 오류: {e1}\n"
+                f"- 2차(strict=True, 리매핑) 오류: {e2}\n"
+                f"- 참고: missing={sorted(missing)}, unexpected={sorted(unexpected)}"
+            )
 
 __all__ = [
     "CMTClassifier",

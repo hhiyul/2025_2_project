@@ -15,40 +15,40 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from PIL import Image, UnidentifiedImageError
 
-# 🔸 너의 모델 코드 파일명이 py_backend/models.py 라면 아래처럼 상대 임포트로 가져와.
 from .models import VAL_TRANSFORM, load_cmt_model
 
 
 # ----------------------------
 # 경로 유틸 (프로젝트 루트/리소스 찾기)
 # ----------------------------
-MODULE_DIR = Path(__file__).resolve().parent
-PROJECT_ROOT = MODULE_DIR.parent
+BASE_DIR = Path(__file__).resolve().parent          # .../2025_2_project/py_backend
 
-def _resolve_resource(name: str, *, env_var: str | None = None) -> Path:
-    """프로젝트 내 리소스 경로를 (환경변수 > 모듈 디렉토리 > 루트) 우선순위로 찾는다."""
-    configured = os.getenv(env_var) if env_var else None
-    if configured:
-        p = Path(configured)
-        return p if p.is_absolute() else (PROJECT_ROOT / p).resolve()
+def _path_from_env_or_default(env_var: str, *relative: str) -> Path:
+    """
+    1) env_var가 설정돼 있으면 그 경로 사용
+       - 절대경로면 그대로
+       - 상대경로면 BASE_DIR 기준으로 해석
+    2) 아니면 BASE_DIR / relative 기본 경로 사용
+    """
+    v = os.getenv(env_var)
+    if v:
+        p = Path(v)
+        if not p.is_absolute():
+            p = BASE_DIR / p
+        return p.resolve()
+    return (BASE_DIR.joinpath(*relative)).resolve()
 
-    relative = Path(name)
-    for candidate in (MODULE_DIR / relative, PROJECT_ROOT / relative):
-        if candidate.exists():
-            return candidate
-    # 존재하지 않아도 합리적 기본 경로 반환(이후 단계에서 FileNotFoundError로 명확히 터뜨림)
-    return (PROJECT_ROOT / relative).resolve()
+# === 최종 경로: 기본은 py_backend/model_pt/..., 필요 시 MODEL_PATH/LABELS_PATH로 덮어쓰기 가능 ===
+MODEL_PATH  = _path_from_env_or_default("MODEL_PATH",  "model_pt", "best_model_fold1.pt")
+LABELS_PATH = _path_from_env_or_default("LABELS_PATH", "model_pt", "label_names.json")
 
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# ----------------------------
-# 설정 (환경변수로 오버라이드 가능)
-# ----------------------------
-# 예) PowerShell:
-#   $env:MODEL_PATH="...\2025_2_project\models\best_model_fold1.pt"
-#   $env:LABELS_PATH="...\2025_2_project\models\labels.json"
-MODEL_PATH  = _resolve_resource("models/best_model_fold1.pt", env_var="MODEL_PATH")
-LABELS_PATH = _resolve_resource("models/labels.json",        env_var="LABELS_PATH")
-DEVICE      = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# (선택) 시작 시 경로 확인/보수적 체크
+if not MODEL_PATH.exists():
+    raise FileNotFoundError(f"Model checkpoint not found: {MODEL_PATH}")
+if not LABELS_PATH.exists():
+    raise FileNotFoundError(f"Label file not found: {LABELS_PATH}")
 
 
 # ----------------------------
@@ -126,7 +126,9 @@ class ModelService:
 # ----------------------------
 # FastAPI 앱 & 라우트
 # ----------------------------
-app = FastAPI(title="Inference Service (FastAPI)")
+app = FastAPI(
+    title="하와와",
+    description="딥러닝이에요")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], allow_credentials=True,
@@ -157,68 +159,68 @@ def health():
 def ui():
     return HTMLResponse(
         """
-        <!doctype html>
-        <html lang="ko">
-        <head>
-          <meta charset="utf-8"/>
-          <title>Inference UI</title>
-          <style>
-            body { font-family: system-ui, -apple-system, sans-serif; margin: 30px; }
-            .card { max-width: 520px; padding: 20px; border: 1px solid #ddd; border-radius: 12px; }
-            .row { margin-top: 12px; }
-            img { max-width: 100%; border-radius: 8px; }
-            button { padding: 10px 14px; border-radius: 8px; border: 1px solid #ccc; cursor:pointer; }
-            #result { margin-top: 10px; font-weight: 600; }
-            #err { color: #b00020; margin-top: 8px; }
-          </style>
-        </head>
-        <body>
-          <h2>이미지 분류 테스트</h2>
-          <div class="card">
-            <div class="row">
-              <input id="file" type="file" accept="image/*"/>
-            </div>
-            <div class="row">
-              <img id="preview" alt="preview" />
-            </div>
-            <div class="row">
-              <button id="btn">분류 요청</button>
-            </div>
-            <div id="result"></div>
-            <div id="err"></div>
-          </div>
-        
-        <script>
-        const $ = id => document.getElementById(id);
-        $("file").addEventListener("change", (e) => {
-          const f = e.target.files[0];
-          if (!f) return;
-          const url = URL.createObjectURL(f);
-          $("preview").src = url;
-        });
-        $("btn").addEventListener("click", async () => {
-          $("result").textContent = "";
-          $("err").textContent = "";
-          const f = $("file").files[0];
-          if (!f) { $("err").textContent = "이미지를 선택하세요."; return; }
-          const form = new FormData();
-          form.append("file", f);
-          try {
-            const res = await fetch("/infer", { method: "POST", body: form });
-            if (!res.ok) {
-              const msg = await res.text();
-              $("err").textContent = "오류: " + msg;
-              return;
-            }
-            const data = await res.json();
-            $("result").textContent = `예측: ${data.prediction}  (conf: ${(data.confidence*100).toFixed(1)}%)`;
-          } catch (e) {
-            $("err").textContent = "요청 실패: " + e;
-          }
-        });
-        </script>
-        </body>
-        </html>
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8"/>
+  <title>Inference UI</title>
+  <style>
+    body { font-family: system-ui, -apple-system, sans-serif; margin: 30px; }
+    .card { max-width: 520px; padding: 20px; border: 1px solid #ddd; border-radius: 12px; }
+    .row { margin-top: 12px; }
+    img { max-width: 100%; border-radius: 8px; }
+    button { padding: 10px 14px; border-radius: 8px; border: 1px solid #ccc; cursor:pointer; }
+    #result { margin-top: 10px; font-weight: 600; }
+    #err { color: #b00020; margin-top: 8px; }
+  </style>
+</head>
+<body>
+  <h2>이미지 분류 테스트</h2>
+  <div class="card">
+    <div class="row">
+      <input id="file" type="file" accept="image/*"/>
+    </div>
+    <div class="row">
+      <img id="preview" alt="preview" />
+    </div>
+    <div class="row">
+      <button id="btn">분류 요청</button>
+    </div>
+    <div id="result"></div>
+    <div id="err"></div>
+  </div>
+
+<script>
+const $ = id => document.getElementById(id);
+$("file").addEventListener("change", (e) => {
+  const f = e.target.files[0];
+  if (!f) return;
+  const url = URL.createObjectURL(f);
+  $("preview").src = url;
+});
+$("btn").addEventListener("click", async () => {
+  $("result").textContent = "";
+  $("err").textContent = "";
+  const f = $("file").files[0];
+  if (!f) { $("err").textContent = "이미지를 선택하세요."; return; }
+  const form = new FormData();
+  form.append("file", f);
+  try {
+    const res = await fetch("/infer", { method: "POST", body: form });
+    if (!res.ok) {
+      const msg = await res.text();
+      $("err").textContent = "오류: " + msg;
+      return;
+    }
+    const data = await res.json();
+    $("result").textContent = `예측: ${data.prediction}  (conf: ${(data.confidence*100).toFixed(1)}%)`;
+  } catch (e) {
+    $("err").textContent = "요청 실패: " + e;
+  }
+});
+</script>
+</body>
+</html>
         """.strip()
     )
 

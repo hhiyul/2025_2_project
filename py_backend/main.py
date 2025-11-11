@@ -15,6 +15,8 @@ from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel
 
 from .models import VAL_TRANSFORM, load_cmt_model
+from .app import  MODEL_PATH, LABELS_PATH
+
 
 #uvicorn py_backend.main:app --host 0.0.0.0 --port 8000 --reload
 logger = logging.getLogger(__name__)
@@ -130,8 +132,6 @@ def _resolve_resource(name: str, *, env_var: str | None = None) -> Path:
     return (PROJECT_ROOT / relative).resolve()
 
 
-MODEL_PATH = _resolve_resource("best_model_fold1.pt", env_var="MODEL_PATH")
-LABELS_PATH = _resolve_resource("label_names.json", env_var="LABELS_PATH")
 
 model_service = ModelService(MODEL_PATH, LABELS_PATH)
 app = FastAPI(title="Inference Service")
