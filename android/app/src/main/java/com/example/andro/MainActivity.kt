@@ -9,9 +9,11 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -58,6 +60,7 @@ class MainActivity : ComponentActivity() {
 
 @PreviewScreenSizes
 @Composable
+
 fun CameraAndGalleryScreen(modifier: Modifier = Modifier) {
     val context = LocalContext.current
     var selectedImageUri by remember { mutableStateOf<Uri?>(null) }
@@ -71,11 +74,11 @@ fun CameraAndGalleryScreen(modifier: Modifier = Modifier) {
             selectedImageUri = pendingCameraUri
             errorMessage = null
         } else {
+            errorMessage = "니미 또 터졌다 !"
             pendingCameraUri?.let { uri ->
                 runCatching { context.contentResolver.delete(uri, null, null) }
             }
         }
-        pendingCameraUri = null
     }
 
     val pickVisualMediaLauncher = rememberLauncherForActivityResult(
@@ -93,7 +96,7 @@ fun CameraAndGalleryScreen(modifier: Modifier = Modifier) {
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
         Text(
-            text = "사진을 촬영하거나 앨범에서 이미지를 선택해 보세요.",
+            text = "사진을 촬영하거나 앨범에서 이미지를 선택하세요.",
             style = MaterialTheme.typography.titleMedium,
             textAlign = TextAlign.Center
         )
@@ -137,42 +140,71 @@ fun CameraAndGalleryScreen(modifier: Modifier = Modifier) {
                 modifier = Modifier.fillMaxWidth()
             )
         }
-
         Button(
-            modifier = Modifier.fillMaxWidth(),
-            onClick = {
-                val uri = runCatching { createImageUri(context) }
-                    .onFailure { throwable ->
-                        errorMessage = throwable.localizedMessage ?: "카메라를 실행할 수 없습니다."
-                    }
-                    .getOrNull()
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(60.dp)
+                .padding(horizontal = 16.dp),
 
-                if (uri != null) {
-                    pendingCameraUri = uri
-                    errorMessage = null
-                    takePictureLauncher.launch(uri)
-                }
-            }
-        ) {
-            Text("카메라로 촬영")
-        }
 
-        Button(
-            modifier = Modifier.fillMaxWidth(),
             onClick = {
                 pickVisualMediaLauncher.launch(
                     PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
                 )
             }
-        ) {
-            Text("앨범에서 선택")
+        )
+        {
+            Text("추론하기")
         }
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp) // 버튼 사이 간격
+        )
+            {
+            Button(
+                modifier = Modifier
+                    .weight(1f)   // 화면의 절반을 차지
+                    .height(40.dp),
+                onClick = {
+                    val uri = runCatching { createImageUri(context) }
+                        .onFailure { throwable ->
+                            errorMessage = throwable.localizedMessage ?: "카메라를 실행할 수 없습니다."
+                        }
+                        .getOrNull()
 
+                    if (uri != null) {
+                        pendingCameraUri = uri
+                        errorMessage = null
+                        takePictureLauncher.launch(uri)
+                    }
+                }
+            ) {
+                Text("카메라로 촬영")
+            }
+
+            Button(
+                modifier = Modifier
+                    .weight(1f)   // 화면의 절반을 차지
+                    .height(40.dp),
+
+
+                onClick = {
+                    pickVisualMediaLauncher.launch(
+                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                    )
+                }
+            )
+            {
+                Text("앨범에서 선택")
+            }
+        }
         Spacer(modifier = Modifier.height(8.dp))
     }
 }
 
-private fun createImageUri(context: Context): Uri {
+private fun createImageUri(context: Context): Uri? {
     val timeStamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
     val imageDir = File(context.cacheDir, "camera").apply {
         if (!exists()) {
