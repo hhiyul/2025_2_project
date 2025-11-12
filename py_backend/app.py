@@ -127,7 +127,7 @@ class ModelService:
 # FastAPI 앱 & 라우트
 # ----------------------------
 app = FastAPI(
-    title="하와와",
+    title="융소프",
     description="딥러닝이에요")
 app.add_middleware(
     CORSMiddleware,
@@ -138,13 +138,16 @@ app.add_middleware(
 model_service = ModelService(MODEL_PATH, LABELS_PATH)
 
 
-@app.get("/")
+@app.get("/", summary="홈")
 def root():
-    return {"message": "Inference service is running"}
+    return {"message": "정상작동 중"}
 
 
-@app.get("/health")
+@app.get("/health", summary="연결상태확인")
 def health():
+    """
+    api 연결상태 정상인지 확인하는 기능
+    """
     return {
         "model_loaded": model_service._model is not None,
         "labels_loaded": bool(model_service._labels),
@@ -155,8 +158,11 @@ def health():
 
 
 # ✅ 시각테스트용 UI 다 만들면 없앨거임
-@app.get("/ui", response_class=HTMLResponse)
+@app.get("/ui", summary="시각용ui", response_class=HTMLResponse)
 def ui():
+    """
+    테스트용 뒤에서 돌아가는지 시각화함
+    """
     return HTMLResponse(
         """
 <!doctype html>
@@ -225,8 +231,11 @@ $("btn").addEventListener("click", async () => {
     )
 
 
-@app.post("/infer", response_model=InferenceResponse)
+@app.post("/infer", summary="딥러닝추론", response_model=InferenceResponse)
 async def infer(file: UploadFile = File(...)):
+    """
+    딥러닝 추론 api
+    """
     blob = await file.read()
     if not blob:
         raise HTTPException(status_code=400, detail="Uploaded file is empty")
