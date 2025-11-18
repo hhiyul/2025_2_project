@@ -6,10 +6,11 @@ import os
 from pathlib import Path
 from threading import Lock
 from typing import Tuple
+from fastapi.security.api_key import APIKeyHeader
 
 import torch
 import torch.nn.functional as F
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, UploadFile, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
@@ -18,18 +19,9 @@ from PIL import Image, UnidentifiedImageError
 from .models import VAL_TRANSFORM, load_cmt_model
 
 
-# ----------------------------
-# 경로 유틸 (프로젝트 루트/리소스 찾기)
-# ----------------------------
-BASE_DIR = Path(__file__).resolve().parent          # .../2025_2_project/py_backend
+BASE_DIR = Path(__file__).resolve().parent
 
 def _path_from_env_or_default(env_var: str, *relative: str) -> Path:
-    """
-    1) env_var가 설정돼 있으면 그 경로 사용
-       - 절대경로면 그대로
-       - 상대경로면 BASE_DIR 기준으로 해석
-    2) 아니면 BASE_DIR / relative 기본 경로 사용
-    """
     v = os.getenv(env_var)
     if v:
         p = Path(v)
@@ -38,22 +30,18 @@ def _path_from_env_or_default(env_var: str, *relative: str) -> Path:
         return p.resolve()
     return (BASE_DIR.joinpath(*relative)).resolve()
 
-# === 최종 경로: 기본은 py_backend/model_pt/..., 필요 시 MODEL_PATH/LABELS_PATH로 덮어쓰기 가능 ===
 MODEL_PATH  = _path_from_env_or_default("MODEL_PATH",  "model_pt", "best_model_fold1.pt")
 LABELS_PATH = _path_from_env_or_default("LABELS_PATH", "model_pt", "label_names.json")
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# (선택) 시작 시 경로 확인/보수적 체크
+
 if not MODEL_PATH.exists():
     raise FileNotFoundError(f"Model checkpoint not found: {MODEL_PATH}")
 if not LABELS_PATH.exists():
     raise FileNotFoundError(f"Label file not found: {LABELS_PATH}")
 
 
-# ----------------------------
-# Pydantic 응답 스키마
-# ----------------------------
 class InferenceResponse(BaseModel):
     filename: str
     content_type: str | None
@@ -62,8 +50,8 @@ class InferenceResponse(BaseModel):
     confidence: float
 
 
-# ----------------------------
-# ModelService (service 분리 없이 여기 포함)
+
+# ModelService
 # ----------------------------
 class ModelService:
     def __init__(self, model_path: Path, labels_path: Path) -> None:
@@ -129,6 +117,7 @@ class ModelService:
 app = FastAPI(
     title="융소프",
     description="딥러닝이에요")
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], allow_credentials=True,
@@ -137,13 +126,22 @@ app.add_middleware(
 
 model_service = ModelService(MODEL_PATH, LABELS_PATH)
 
+#API키
+API_KEY = "fuck-key-123"
+api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+#api키 맞나 체크하는거 틀리면 오류코드 반환
+async def check_api_key(api_key: str = Depends(api_key_header)):
+    if api_key != API_KEY:
+        raise HTTPException(status_code=403, detail="Invalid or missing API Key")
+    return api_key
 
 @app.get("/", summary="홈")
 def root():
     return {"message": "정상작동 중"}
 
 
-@app.get("/health", summary="연결상태확인")
+@app.get("/health", summary="연결상태확인", dependencies=[Depends(check_api_key)])
 def health():
     """
     api 연결상태 정상인지 확인하는 기능
@@ -231,7 +229,7 @@ $("btn").addEventListener("click", async () => {
     )
 
 
-@app.post("/infer", summary="딥러닝추론", response_model=InferenceResponse)
+@app.post("/infer", summary="딥러닝추론", response_model=InferenceResponse, dependencies=[Depends(check_api_key)])
 async def infer(file: UploadFile = File(...)):
     """
     딥러닝 추론 api
