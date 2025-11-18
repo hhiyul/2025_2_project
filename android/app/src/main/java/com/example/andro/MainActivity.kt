@@ -38,6 +38,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
+import com.example.andro.network.InferenceResponse
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.tooling.preview.PreviewScreenSizes
 import androidx.compose.ui.unit.dp
@@ -63,12 +64,14 @@ import org.json.JSONObject
 
 
 class MainActivity : ComponentActivity() {
+    private val inferenceViewModel: InferenceViewModel by viewModels()
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         setContent {
             AndroTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
+                    MainScreen(viewModel = inferenceViewModel)
                     CameraAndGalleryScreen()
                 }
             }
@@ -226,7 +229,7 @@ fun CameraAndGalleryScreen(modifier: Modifier = Modifier) {
 
         // 추론하기
         Button(
-            enabled = uiState != InferenceUiState.Loading,
+            enabled = uiState !is InferenceUiState.Loading,
             modifier = Modifier
                 .fillMaxWidth()
                 .height(60.dp)
@@ -234,21 +237,18 @@ fun CameraAndGalleryScreen(modifier: Modifier = Modifier) {
             onClick = {
                 val uri = selectedImageUri
                 if (uri == null) {
-                    uiState = InferenceUiState.Error("이미지를 먼저 선택하거나 촬영하세요.")
+                    viewModel.uiState = InferenceUiState.Error("이미지를 먼저 선택하거나 촬영하세요.")
                     return@Button
                 }
-                uiState = InferenceUiState.Loading
-                scope.launch {
-                    try {
-                        val result = uploadAndInfer(context, uri)
-                        uiState = InferenceUiState.Success(result)
-                    } catch (e: Exception) {
-                        uiState = InferenceUiState.Error(e.localizedMessage ?: "추론 중 오류가 발생했습니다.")
-                    }
-                }
+
+                // 🚀 ViewModel을 통해 추론 요청
+                viewModel.inferImage(context, uri)
             }
         ) {
-            Text(if (uiState == InferenceUiState.Loading) "추론 중..." else "추론하기")
+            Text(
+                if (uiState is InferenceUiState.Loading) "추론 중..."
+                else "추론하기"
+            )
         }
 
         // 하단 버튼들
@@ -374,5 +374,37 @@ fun formatInferenceResultAsJson(result: InferenceResponse): String {
 private fun CameraAndGalleryScreenPreview() {
     AndroTheme {
         CameraAndGalleryScreen()
+    }
+}
+@Composable
+fun MainScreen(viewModel: InferenceViewModel) {
+    val context = LocalContext.current
+    val uistate = viewModel.uiState
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(16.dp)
+    ) {
+        Text(
+            text = when (uistate) {
+                is InferenceUiState.Idle -> "대기 중"
+                is InferenceUiState.Loading -> "서버 요청 중..."
+                is InferenceUiState.Success ->
+                    "결과: ${uistate.response.prediction} (conf=${uistate.response.confidence})"
+                is InferenceUiState.Error -> "에러: ${uistate.message}"
+            }
+        )
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        Button(
+            onClick = { viewModel.checkHealth() }
+        ) {
+            Text("서버 연결 테스트 (/health)")
+        }
+
+        // 나중에 여기 아래에 CameraAndGalleryScreen 넣고
+        // 이미지 URI 나오면 viewModel.inferImage(context, uri) 호출해주면 됨
     }
 }
