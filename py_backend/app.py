@@ -16,6 +16,7 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from PIL import Image, UnidentifiedImageError
 
+
 from .models import VAL_TRANSFORM, load_cmt_model
 
 
