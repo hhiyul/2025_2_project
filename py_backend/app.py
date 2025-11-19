@@ -6,54 +6,44 @@ import os
 from pathlib import Path
 from threading import Lock
 from typing import Tuple
+from fastapi.security.api_key import APIKeyHeader
 
 import torch
 import torch.nn.functional as F
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, UploadFile, Depends, Request, Security
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from PIL import Image, UnidentifiedImageError
 
-# 🔸 너의 모델 코드 파일명이 py_backend/models.py 라면 아래처럼 상대 임포트로 가져와.
+from fastapi.security import APIKeyHeader, APIKeyQuery
+from starlette.status import HTTP_401_UNAUTHORIZED
 from .models import VAL_TRANSFORM, load_cmt_model
 
 
-# ----------------------------
-# 경로 유틸 (프로젝트 루트/리소스 찾기)
-# ----------------------------
-MODULE_DIR = Path(__file__).resolve().parent
-PROJECT_ROOT = MODULE_DIR.parent
+BASE_DIR = Path(__file__).resolve().parent
 
-def _resolve_resource(name: str, *, env_var: str | None = None) -> Path:
-    """프로젝트 내 리소스 경로를 (환경변수 > 모듈 디렉토리 > 루트) 우선순위로 찾는다."""
-    configured = os.getenv(env_var) if env_var else None
-    if configured:
-        p = Path(configured)
-        return p if p.is_absolute() else (PROJECT_ROOT / p).resolve()
+def _path_from_env_or_default(env_var: str, *relative: str) -> Path:
+    v = os.getenv(env_var)
+    if v:
+        p = Path(v)
+        if not p.is_absolute():
+            p = BASE_DIR / p
+        return p.resolve()
+    return (BASE_DIR.joinpath(*relative)).resolve()
 
-    relative = Path(name)
-    for candidate in (MODULE_DIR / relative, PROJECT_ROOT / relative):
-        if candidate.exists():
-            return candidate
-    # 존재하지 않아도 합리적 기본 경로 반환(이후 단계에서 FileNotFoundError로 명확히 터뜨림)
-    return (PROJECT_ROOT / relative).resolve()
+MODEL_PATH  = _path_from_env_or_default("MODEL_PATH",  "model_pt", "best_model_fold1.pt")
+LABELS_PATH = _path_from_env_or_default("LABELS_PATH", "model_pt", "label_names.json")
+
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-# ----------------------------
-# 설정 (환경변수로 오버라이드 가능)
-# ----------------------------
-# 예) PowerShell:
-#   $env:MODEL_PATH="...\2025_2_project\models\best_model_fold1.pt"
-#   $env:LABELS_PATH="...\2025_2_project\models\labels.json"
-MODEL_PATH  = _resolve_resource("models/best_model_fold1.pt", env_var="MODEL_PATH")
-LABELS_PATH = _resolve_resource("models/labels.json",        env_var="LABELS_PATH")
-DEVICE      = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+if not MODEL_PATH.exists():
+    raise FileNotFoundError(f"Model checkpoint not found: {MODEL_PATH}")
+if not LABELS_PATH.exists():
+    raise FileNotFoundError(f"Label file not found: {LABELS_PATH}")
 
 
-# ----------------------------
-# Pydantic 응답 스키마
-# ----------------------------
 class InferenceResponse(BaseModel):
     filename: str
     content_type: str | None
@@ -62,8 +52,8 @@ class InferenceResponse(BaseModel):
     confidence: float
 
 
-# ----------------------------
-# ModelService (service 분리 없이 여기 포함)
+
+# ModelService
 # ----------------------------
 class ModelService:
     def __init__(self, model_path: Path, labels_path: Path) -> None:
@@ -126,7 +116,11 @@ class ModelService:
 # ----------------------------
 # FastAPI 앱 & 라우트
 # ----------------------------
-app = FastAPI(title="Inference Service (FastAPI)")
+app = FastAPI(
+    title="융소프",
+    description="딥러닝이에요"
+    )
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], allow_credentials=True,
@@ -135,14 +129,27 @@ app.add_middleware(
 
 model_service = ModelService(MODEL_PATH, LABELS_PATH)
 
+#API키
+API_KEY = "fuck-key-123"
+API_KEY_NAME = "X-API-Key"
+api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
-@app.get("/")
+#api키 맞나 체크하는거 틀리면 오류코드 반환
+async def check_api_key(api_key: str = Depends(api_key_header)):
+    if api_key != API_KEY:
+        raise HTTPException(status_code=403, detail="Invalid or missing API Key")
+    return api_key
+
+@app.get("/", summary="홈")
 def root():
-    return {"message": "Inference service is running"}
+    return {"message": "정상작동 중"}
 
 
-@app.get("/health")
+@app.get("/health", summary="연결상태확인", dependencies=[Depends(check_api_key)])
 def health():
+    """
+    api 연결상태 정상인지 확인하는 기능
+    """
     return {
         "model_loaded": model_service._model is not None,
         "labels_loaded": bool(model_service._labels),
@@ -153,78 +160,103 @@ def health():
 
 
 # ✅ 시각테스트용 UI 다 만들면 없앨거임
-@app.get("/ui", response_class=HTMLResponse)
+@app.get("/ui", summary="시각용ui", response_class=HTMLResponse)
 def ui():
+    """
+    테스트용 뒤에서 돌아가는지 시각화함
+    """
     return HTMLResponse(
         """
-        <!doctype html>
-        <html lang="ko">
-        <head>
-          <meta charset="utf-8"/>
-          <title>Inference UI</title>
-          <style>
-            body { font-family: system-ui, -apple-system, sans-serif; margin: 30px; }
-            .card { max-width: 520px; padding: 20px; border: 1px solid #ddd; border-radius: 12px; }
-            .row { margin-top: 12px; }
-            img { max-width: 100%; border-radius: 8px; }
-            button { padding: 10px 14px; border-radius: 8px; border: 1px solid #ccc; cursor:pointer; }
-            #result { margin-top: 10px; font-weight: 600; }
-            #err { color: #b00020; margin-top: 8px; }
-          </style>
-        </head>
-        <body>
-          <h2>이미지 분류 테스트</h2>
-          <div class="card">
-            <div class="row">
-              <input id="file" type="file" accept="image/*"/>
-            </div>
-            <div class="row">
-              <img id="preview" alt="preview" />
-            </div>
-            <div class="row">
-              <button id="btn">분류 요청</button>
-            </div>
-            <div id="result"></div>
-            <div id="err"></div>
-          </div>
-        
-        <script>
-        const $ = id => document.getElementById(id);
-        $("file").addEventListener("change", (e) => {
-          const f = e.target.files[0];
-          if (!f) return;
-          const url = URL.createObjectURL(f);
-          $("preview").src = url;
-        });
-        $("btn").addEventListener("click", async () => {
-          $("result").textContent = "";
-          $("err").textContent = "";
-          const f = $("file").files[0];
-          if (!f) { $("err").textContent = "이미지를 선택하세요."; return; }
-          const form = new FormData();
-          form.append("file", f);
-          try {
-            const res = await fetch("/infer", { method: "POST", body: form });
-            if (!res.ok) {
-              const msg = await res.text();
-              $("err").textContent = "오류: " + msg;
-              return;
-            }
-            const data = await res.json();
-            $("result").textContent = `예측: ${data.prediction}  (conf: ${(data.confidence*100).toFixed(1)}%)`;
-          } catch (e) {
-            $("err").textContent = "요청 실패: " + e;
-          }
-        });
-        </script>
-        </body>
-        </html>
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8"/>
+  <title>Inference UI</title>
+  <style>
+    body { font-family: system-ui, -apple-system, sans-serif; margin: 30px; }
+    .card { max-width: 520px; padding: 20px; border: 1px solid #ddd; border-radius: 12px; }
+    .row { margin-top: 12px; }
+    img { max-width: 100%; border-radius: 8px; }
+    button { padding: 10px 14px; border-radius: 8px; border: 1px solid #ccc; cursor:pointer; }
+    #result { margin-top: 10px; font-weight: 600; }
+    #err { color: #b00020; margin-top: 8px; }
+  </style>
+</head>
+<body>
+  <h2>이미지 분류 테스트</h2>
+  <div class="card">
+    <div class="row">
+      <input id="file" type="file" accept="image/*"/>
+    </div>
+    <div class="row">
+      <img id="preview" alt="preview" />
+    </div>
+    <div class="row">
+      <button id="btn">분류 요청</button>
+    </div>
+    <div id="result"></div>
+    <div id="err"></div>
+  </div>
+
+<script>
+const $ = id => document.getElementById(id);
+
+// 파일 선택 시 미리보기
+$("file").addEventListener("change", (e) => {
+  const f = e.target.files[0];
+  if (!f) return;
+  const url = URL.createObjectURL(f);
+  $("preview").src = url;
+});
+
+// 분류 요청 버튼 클릭
+$("btn").addEventListener("click", async () => {
+  $("result").textContent = "";
+  $("err").textContent = "";
+
+  const f = $("file").files[0];
+  if (!f) {
+    $("err").textContent = "이미지를 선택하세요.";
+    return;
+  }
+
+  const form = new FormData();
+  form.append("file", f);
+
+  try {
+    const res = await fetch("/infer", {
+      method: "POST",
+      headers: {
+        "X-API-Key": "fuck-key-123",   // 🔑 FastAPI에서 검사하는 헤더
+      },
+      body: form,
+    });
+
+    if (!res.ok) {
+      const msg = await res.text();
+      $("err").textContent = "오류: " + msg;
+      return;
+    }
+
+    const data = await res.json();
+    $("result").textContent =
+      `예측: ${data.prediction}  (conf: ${(data.confidence * 100).toFixed(1)}%)`;
+
+  } catch (err) {
+    $("err").textContent = "요청 실패: " + err;
+  }
+});
+</script>
+</body>
+</html>
         """.strip()
     )
 
-
-@app.post("/infer", response_model=InferenceResponse)
+@app.post("/infer", summary="딥러닝추론", response_model=InferenceResponse, dependencies=[Depends(check_api_key)])
 async def infer(file: UploadFile = File(...)):
+    """
+    딥러닝 추론 api
+    """
     blob = await file.read()
     if not blob:
         raise HTTPException(status_code=400, detail="Uploaded file is empty")

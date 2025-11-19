@@ -3,7 +3,7 @@
   <component name="Black">
     <option name="sdkName" value="C:\Users\rkdrn\anaconda3" />
   </component>
-  <component name="ProjectRootManager" version="2" project-jdk-name="C:\Users\rkdrn\anaconda3" project-jdk-type="Python SDK">
+  <component name="ProjectRootManager" version="2" languageLevel="JDK_25" project-jdk-name="C:\Users\rkdrn\anaconda3" project-jdk-type="Python SDK">
     <output url="file://$PROJECT_DIR$/out" />
   </component>
 </project>
