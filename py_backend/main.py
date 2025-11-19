@@ -11,7 +11,6 @@ from pydantic import BaseModel
 #uvicorn py_backend.app:app --host 0.0.0.0 --port 8000 --reload
 #ngrok http 8000
 #위에 2줄은 무시해도됨
-
 logger = logging.getLogger(__name__)
 
 

@@ -20,6 +20,23 @@ from fastapi.security import APIKeyHeader, APIKeyQuery
 from starlette.status import HTTP_401_UNAUTHORIZED
 from .models import VAL_TRANSFORM, load_cmt_model
 
+LABEL_KR = {
+    "freshapples": "Fresh Apples",
+    "freshbanana": "Fresh Banana",
+    "freshcapsicum": "Fresh Capsicum",
+    "freshcucumber": "Fresh Cucumber",
+    "freshoranges": "Fresh Oranges",
+    "freshpotato": "Fresh Potato",
+    "freshtomato": "Fresh Tomato",
+
+    "rottenapples": "Rotten Apples",
+    "rottenbanana": "Rotten Banana",
+    "rottencapsicum": "Rotten Capsicum",
+    "rottencucumber": "Rotten Cucumber",
+    "rottenoranges": "Rotten Oranges",
+    "rottenpotato": "Rotten Potato",
+    "rottentomato": "Rotten Tomato"
+}
 
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -261,10 +278,11 @@ async def infer(file: UploadFile = File(...)):
     if not blob:
         raise HTTPException(status_code=400, detail="Uploaded file is empty")
     pred, conf = model_service.predict(blob)
+    pred_kr = LABEL_KR.get(pred, pred)
     return InferenceResponse(
         filename=file.filename or "uploaded_image",
         content_type=file.content_type,
         size_bytes=len(blob),
-        prediction=pred,
+        prediction=pred_kr,
         confidence=conf,
     )
