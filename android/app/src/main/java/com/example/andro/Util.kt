@@ -29,7 +29,6 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.unit.dp
-import androidx.core.content.FileProvider
 import coil.compose.AsyncImage
 import com.example.andro.network.InferenceResponse
 import kotlinx.coroutines.Dispatchers
@@ -39,17 +38,15 @@ import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
 import okhttp3.RequestBody.Companion.toRequestBody
 import retrofit2.Retrofit
+import android.app.Activity
+import android.content.pm.ActivityInfo
+import android.content.res.Configuration
+import androidx.compose.ui.platform.LocalContext
 import retrofit2.converter.gson.GsonConverterFactory
 import retrofit2.http.Multipart
 import retrofit2.http.POST
 import retrofit2.http.Part
-import java.io.File
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 
-
-// ===== Retrofit 인터페이스 & 데이터 클래스 =====
 interface InferenceApi {
     @Multipart
     @POST("infer")
@@ -185,5 +182,43 @@ fun ResultSheetContent(
 
 
         Spacer(modifier = Modifier.height(12.dp))
+    }
+}
+
+//네트워크 통신중 화면 전환 방지
+@Composable
+fun LockOrientationWhileLoading(isLoading: Boolean) {
+    val context = LocalContext.current
+    val activity = context as? Activity
+    val savedOrientation = remember {
+        mutableStateOf(ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED)
+    }
+
+    LaunchedEffect(isLoading) {
+        if (activity == null) return@LaunchedEffect
+
+        if (isLoading) {
+            // 지금 설정을 저장해 둔다
+            savedOrientation.value = activity.requestedOrientation
+
+            // 아직 아무 고정이 없는 상태라면(UNSPECIFIED) → 현재 방향으로 잠그기
+            if (activity.requestedOrientation == ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED) {
+                val currentOrientation = activity.resources.configuration.orientation
+                val lockOrientation =
+                    if (currentOrientation == Configuration.ORIENTATION_LANDSCAPE)
+                        ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+                    else
+                        ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+
+                activity.requestedOrientation = lockOrientation
+            }
+        } else {
+            // 로딩 끝나면 다시 원래 설정으로 돌리기
+            activity.requestedOrientation =
+                if (savedOrientation.value == ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED)
+                    ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+                else
+                    savedOrientation.value
+        }
     }
 }
