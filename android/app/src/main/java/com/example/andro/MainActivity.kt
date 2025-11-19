@@ -1,28 +1,20 @@
 package com.example.andro
 
+import android.os.Bundle
 import android.Manifest
 import android.content.Context
-import android.content.pm.PackageManager
 import android.net.Uri
-import android.os.Bundle
 import androidx.activity.ComponentActivity
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.activity.compose.rememberLauncherForActivityResult
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
-import okhttp3.MediaType.Companion.toMediaTypeOrNull
-import okhttp3.MultipartBody
-import okhttp3.RequestBody.Companion.toRequestBody
-import org.json.JSONObject
-import java.io.File
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import android.content.pm.PackageManager
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -46,22 +38,35 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
+import com.example.andro.network.InferenceResponse
+import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.tooling.preview.PreviewScreenSizes
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import coil.compose.AsyncImage
-import com.example.andro.network.InferenceResponse
-import com.example.andro.network.RetrofitInstance
 import com.example.andro.ui.theme.AndroTheme
+import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import android.webkit.MimeTypeMap
+import okhttp3.MediaType.Companion.toMediaTypeOrNull
+import okhttp3.MultipartBody
+import okhttp3.OkHttpClient
+import okhttp3.RequestBody.Companion.toRequestBody
+import retrofit2.Retrofit
+import retrofit2.converter.gson.GsonConverterFactory
+import retrofit2.http.Multipart
+import retrofit2.http.POST
+import retrofit2.http.Part
+import org.json.JSONObject
 
 
 class MainActivity : ComponentActivity() {
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-
         setContent {
             AndroTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
@@ -72,29 +77,22 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+@PreviewScreenSizes
 @Composable
-fun CameraAndGalleryScreen(
-    modifier: Modifier = Modifier
-) {
+fun CameraAndGalleryScreen(modifier: Modifier = Modifier) {
     val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-
     var selectedImageUri by remember { mutableStateOf<Uri?>(null) }
     var pendingCameraUri by remember { mutableStateOf<Uri?>(null) }
-
     var uiState by remember { mutableStateOf<InferenceUiState>(InferenceUiState.Idle) }
-    var localMessage by remember { mutableStateOf<String?>(null) }
-
-    // 사진 촬영 런처
+    val scope = rememberCoroutineScope()
     val takePictureLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.TakePicture()
     ) { success ->
         if (success) {
             selectedImageUri = pendingCameraUri
-            localMessage = null
             uiState = InferenceUiState.Idle
         } else {
-            localMessage = "촬영이 취소되었거나 실패했습니다."
+            uiState = InferenceUiState.Error("촬영이 취소되었거나 실패했습니다.")
             pendingCameraUri?.let { uri ->
                 runCatching { context.contentResolver.delete(uri, null, null) }
             }
@@ -104,13 +102,12 @@ fun CameraAndGalleryScreen(
     fun launchCamera() {
         val uri = runCatching { createImageUri(context) }
             .onFailure { throwable ->
-                localMessage = throwable.localizedMessage ?: "카메라를 실행할 수 없습니다."
+                uiState = InferenceUiState.Error(throwable.localizedMessage ?: "카메라를 실행할 수 없습니다.")
             }
             .getOrNull()
 
         if (uri != null) {
             pendingCameraUri = uri
-            localMessage = null
             uiState = InferenceUiState.Idle
             takePictureLauncher.launch(uri)
         }
@@ -123,7 +120,7 @@ fun CameraAndGalleryScreen(
         if (granted) {
             launchCamera()
         } else {
-            localMessage = "카메라 권한이 필요합니다."
+            uiState = InferenceUiState.Error("카메라 권한이 필요합니다.")
         }
     }
 
@@ -132,7 +129,6 @@ fun CameraAndGalleryScreen(
         contract = ActivityResultContracts.PickVisualMedia()
     ) { uri ->
         selectedImageUri = uri
-        localMessage = null
         uiState = InferenceUiState.Idle
     }
 
@@ -149,7 +145,6 @@ fun CameraAndGalleryScreen(
             textAlign = TextAlign.Center
         )
 
-        // 이미지 미리보기
         Surface(
             modifier = Modifier
                 .fillMaxWidth()
@@ -180,30 +175,48 @@ fun CameraAndGalleryScreen(
             }
         }
 
-        // 상태 메시지
-        val messageFromState = when (val state = uiState) {
-            is InferenceUiState.Error   -> state.message
-            is InferenceUiState.Success -> formatInferenceResultAsJson(state.response)
-            InferenceUiState.Idle       -> "선택한 이미지를 확인한 뒤 추론을 실행하세요."
-            InferenceUiState.Loading    -> "추론을 실행 중입니다..."
+        // 추론 상태 안내
+        when (val state = uiState) {
+            is InferenceUiState.Error -> {
+                Text(
+                    text = state.message,
+                    color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.bodyMedium,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+
+            is InferenceUiState.Success -> {
+                Text(
+                    text = "예측 결과: ${state.response.prediction}",
+                    style = MaterialTheme.typography.bodyMedium,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+
+            InferenceUiState.Idle -> {
+                Text(
+                    text = "이미지를 확인한 뒤 추론하기를 눌러주세요.",
+                    style = MaterialTheme.typography.bodySmall,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth(),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+
+            InferenceUiState.Loading -> {
+                Text(
+                    text = "잠시만 기달려 주세요...",
+                    style = MaterialTheme.typography.bodyMedium,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
         }
 
-        val isError = localMessage != null || uiState is InferenceUiState.Error
-        val textColor = if (isError) {
-            MaterialTheme.colorScheme.error
-        } else {
-            MaterialTheme.colorScheme.onSurface
-        }
-
-        Text(
-            text = localMessage ?: messageFromState,
-            color = textColor,
-            style = MaterialTheme.typography.bodyMedium,
-            textAlign = TextAlign.Center,
-            modifier = Modifier.fillMaxWidth()
-        )
-
-        // 🔥 추론 버튼
+        // 추론하기
         Button(
             enabled = uiState !is InferenceUiState.Loading,
             modifier = Modifier
@@ -213,46 +226,18 @@ fun CameraAndGalleryScreen(
             onClick = {
                 val uri = selectedImageUri
                 if (uri == null) {
-                    localMessage = "이미지를 먼저 선택하거나 촬영하세요."
+                    uiState = InferenceUiState.Error("이미지를 먼저 선택하거나 촬영하세요.")
                     return@Button
                 }
 
-                localMessage = null
-                uiState = InferenceUiState.Loading
-
                 scope.launch {
+                    uiState = InferenceUiState.Loading
                     try {
-                        // 이미지 → 바이트 배열
-                        val bytes = withContext(Dispatchers.IO) {
-                            context.contentResolver
-                                .openInputStream(uri)
-                                ?.use { it.readBytes() }
-                                ?: throw IllegalArgumentException("이미지 읽기 실패")
-                        }
-
-                        // Multipart 파일 생성
-                        val body = bytes.toRequestBody("image/jpeg".toMediaTypeOrNull())
-                        val part = MultipartBody.Part.createFormData(
-                            name = "file",
-                            filename = "image.jpg",
-                            body = body
-                        )
-
-                        // FastAPI /infer 호출
-                        val response = withContext(Dispatchers.IO) {
-                            RetrofitInstance.api.infer(part)
-                        }
-
-                        if (response.isSuccessful && response.body() != null) {
-                            uiState = InferenceUiState.Success(response.body()!!)
-                        } else {
-                            uiState = InferenceUiState.Error(
-                                "infer 실패: ${response.code()} ${response.message()}"
-                            )
-                        }
+                        val result = uploadAndInfer(context, uri)
+                        uiState = InferenceUiState.Success(result)
                     } catch (e: Exception) {
                         uiState = InferenceUiState.Error(
-                            "infer 에러: ${e.localizedMessage ?: "알 수 없는 오류"}"
+                            e.localizedMessage ?: "추론 요청 중 오류가 발생했습니다."
                         )
                     }
                 }
@@ -264,7 +249,7 @@ fun CameraAndGalleryScreen(
             )
         }
 
-        // 하단 버튼: 카메라 / 앨범
+        // 하단 버튼들
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -304,12 +289,10 @@ fun CameraAndGalleryScreen(
                 Text("앨범에서 선택")
             }
         }
-
         Spacer(modifier = Modifier.height(8.dp))
     }
 }
 
-// ----- 이미지 파일 URI 생성 -----
 private fun createImageUri(context: Context): Uri? {
     val timeStamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
     val imageDir = File(context.cacheDir, "camera").apply {
@@ -323,19 +306,70 @@ private fun createImageUri(context: Context): Uri? {
     )
 }
 
-// ----- 추론 결과 JSON 포맷 -----
+// ===== Retrofit 인터페이스 & 데이터 클래스 =====
+interface InferenceApi {
+    @Multipart
+    @POST("infer")
+    suspend fun infer(@Part file: MultipartBody.Part): InferenceResponse
+}
+
+
+// ===== 업로드 + 추론 호출 =====
+suspend fun uploadAndInfer(context: Context, uri: Uri): InferenceResponse =
+    withContext(Dispatchers.IO) {
+        // 에뮬레이터 → 로컬 FastAPI 서버
+        // 실제 기기 + ngrok 쓰면 baseUrl을 ngrok URL로 바꾸면 됨
+        val client = OkHttpClient.Builder()
+            .addInterceptor { chain ->
+                val newReq = chain.request().newBuilder()
+                    .addHeader("X-API-Key", "fuck-key-123") // 🔑 FastAPI 인증 헤더
+                    .build()
+                chain.proceed(newReq)
+            }
+            .build()
+
+        val retrofit = Retrofit.Builder()
+            .baseUrl("https://uncially-engrossing-keeley.ngrok-free.dev/")   // PC에서 FastAPI가 돌고 있을 때
+            .client(client)
+            .addConverterFactory(GsonConverterFactory.create())
+            .build()
+
+        val api = retrofit.create(InferenceApi::class.java)
+
+        val cr = context.contentResolver
+        val mime = cr.getType(uri) ?: run {
+            val ext = MimeTypeMap.getFileExtensionFromUrl(uri.toString())
+            MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext) ?: "application/octet-stream"
+        }
+
+        val name = runCatching {
+            cr.query(uri, null, null, null, null)?.use { c ->
+                val nameIdx = c.getColumnIndex("_display_name")
+                if (c.moveToFirst() && nameIdx >= 0) c.getString(nameIdx) else null
+            }
+        }.getOrNull() ?: "upload." + (MimeTypeMap.getSingleton().getExtensionFromMimeType(mime) ?: "jpg")
+
+        val bytes = cr.openInputStream(uri)?.use { it.readBytes() }
+            ?: error("이미지 열기 실패")
+
+        val body = bytes.toRequestBody(mime.toMediaTypeOrNull())
+        val part = MultipartBody.Part.createFormData("file", name, body)
+
+        api.infer(part)
+    }
+
 fun formatInferenceResultAsJson(result: InferenceResponse): String {
     val json = JSONObject().apply {
-        put("filename", result.filename)
-        put("prediction", result.prediction)
+        put("filename", result.filename ?: JSONObject.NULL)
+        put("content_type", result.content_type ?: JSONObject.NULL)
+        put("size_bytes", result.size_bytes)
+        put("prediction", result.prediction ?: JSONObject.NULL)
         put("confidence", result.confidence)
     }
     return json.toString(2)
 }
-@PreviewScreenSizes
+
 @Composable
-private fun CameraAndGalleryScreenPreview() {
-    AndroTheme {
-        CameraAndGalleryScreen()
-    }
+fun ResultScreen(prediction: String) {
+    Text("예측 결과: $prediction")
 }

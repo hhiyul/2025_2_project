@@ -10,8 +10,10 @@ import retrofit2.http.Part
 // FastAPI /infer 응답 형식과 맞춰야 함
 data class InferenceResponse(
     val filename: String,
+    val content_type: String?,
+    val size_bytes: Int,
     val prediction: String,
-    val confidence: Float
+    val confidence: Double
 )
 
 interface ApiService {

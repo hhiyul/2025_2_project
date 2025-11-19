@@ -10,13 +10,14 @@ from fastapi.security.api_key import APIKeyHeader
 
 import torch
 import torch.nn.functional as F
-from fastapi import FastAPI, File, HTTPException, UploadFile, Depends
+from fastapi import FastAPI, File, HTTPException, UploadFile, Depends, Request, Security
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from PIL import Image, UnidentifiedImageError
 
-
+from fastapi.security import APIKeyHeader, APIKeyQuery
+from starlette.status import HTTP_401_UNAUTHORIZED
 from .models import VAL_TRANSFORM, load_cmt_model
 
 
@@ -117,7 +118,8 @@ class ModelService:
 # ----------------------------
 app = FastAPI(
     title="융소프",
-    description="딥러닝이에요")
+    description="딥러닝이에요"
+    )
 
 app.add_middleware(
     CORSMiddleware,
@@ -129,6 +131,7 @@ model_service = ModelService(MODEL_PATH, LABELS_PATH)
 
 #API키
 API_KEY = "fuck-key-123"
+API_KEY_NAME = "X-API-Key"
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 #api키 맞나 체크하는거 틀리면 오류코드 반환
@@ -197,30 +200,50 @@ def ui():
 
 <script>
 const $ = id => document.getElementById(id);
+
+// 파일 선택 시 미리보기
 $("file").addEventListener("change", (e) => {
   const f = e.target.files[0];
   if (!f) return;
   const url = URL.createObjectURL(f);
   $("preview").src = url;
 });
+
+// 분류 요청 버튼 클릭
 $("btn").addEventListener("click", async () => {
   $("result").textContent = "";
   $("err").textContent = "";
+
   const f = $("file").files[0];
-  if (!f) { $("err").textContent = "이미지를 선택하세요."; return; }
+  if (!f) {
+    $("err").textContent = "이미지를 선택하세요.";
+    return;
+  }
+
   const form = new FormData();
   form.append("file", f);
+
   try {
-    const res = await fetch("/infer", { method: "POST", body: form });
+    const res = await fetch("/infer", {
+      method: "POST",
+      headers: {
+        "X-API-Key": "fuck-key-123",   // 🔑 FastAPI에서 검사하는 헤더
+      },
+      body: form,
+    });
+
     if (!res.ok) {
       const msg = await res.text();
       $("err").textContent = "오류: " + msg;
       return;
     }
+
     const data = await res.json();
-    $("result").textContent = `예측: ${data.prediction}  (conf: ${(data.confidence*100).toFixed(1)}%)`;
-  } catch (e) {
-    $("err").textContent = "요청 실패: " + e;
+    $("result").textContent =
+      `예측: ${data.prediction}  (conf: ${(data.confidence * 100).toFixed(1)}%)`;
+
+  } catch (err) {
+    $("err").textContent = "요청 실패: " + err;
   }
 });
 </script>
@@ -228,7 +251,6 @@ $("btn").addEventListener("click", async () => {
 </html>
         """.strip()
     )
-
 
 @app.post("/infer", summary="딥러닝추론", response_model=InferenceResponse, dependencies=[Depends(check_api_key)])
 async def infer(file: UploadFile = File(...)):
